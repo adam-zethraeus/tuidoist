@@ -1,0 +1,276 @@
+package main
+
+import (
+	"strings"
+	"time"
+)
+
+// API response wrapper for paginated endpoints
+type PaginatedResponse[T any] struct {
+	Results    []T     `json:"results"`
+	NextCursor *string `json:"next_cursor"`
+}
+
+// Project represents a Todoist project
+type Project struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Color        string  `json:"color"`
+	ParentID     *string `json:"parent_id"`
+	ChildOrder   int     `json:"child_order"`
+	IsFavorite   bool    `json:"is_favorite"`
+	IsArchived   bool    `json:"is_archived"`
+	IsDeleted    bool    `json:"is_deleted"`
+	ViewStyle    string  `json:"view_style"`
+	InboxProject bool    `json:"inbox_project"`
+	Description  string  `json:"description"`
+}
+
+// Section represents a Todoist section
+type Section struct {
+	ID           string `json:"id"`
+	ProjectID    string `json:"project_id"`
+	Name         string `json:"name"`
+	SectionOrder int    `json:"section_order"`
+	IsArchived   bool   `json:"is_archived"`
+	IsDeleted    bool   `json:"is_deleted"`
+}
+
+// Due represents a task due date
+type Due struct {
+	Date        string  `json:"date"`
+	Timezone    *string `json:"timezone"`
+	String      string  `json:"string"`
+	Lang        string  `json:"lang"`
+	IsRecurring bool    `json:"is_recurring"`
+}
+
+// Task represents a Todoist task
+type Task struct {
+	ID           string   `json:"id"`
+	UserID       string   `json:"user_id"`
+	ProjectID    string   `json:"project_id"`
+	SectionID    string   `json:"section_id"`
+	ParentID     *string  `json:"parent_id"`
+	Content      string   `json:"content"`
+	Description  string   `json:"description"`
+	Priority     int      `json:"priority"`
+	Due          *Due     `json:"due"`
+	Labels       []string `json:"labels"`
+	ChildOrder   int      `json:"child_order"`
+	Checked      bool     `json:"checked"`
+	IsDeleted    bool     `json:"is_deleted"`
+	AddedAt      string   `json:"added_at"`
+	CompletedAt  *string  `json:"completed_at"`
+	NoteCount    int      `json:"note_count"`
+}
+
+// Label represents a Todoist label
+type Label struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Color      string `json:"color"`
+	Order      int    `json:"order"`
+	IsFavorite bool   `json:"is_favorite"`
+}
+
+// Comment represents a Todoist comment
+type Comment struct {
+	ID        string  `json:"id"`
+	TaskID    *string `json:"task_id"`
+	ProjectID *string `json:"project_id"`
+	Content   string  `json:"content"`
+	PostedAt  string  `json:"posted_at"`
+}
+
+// --- Message types for async Bubbletea commands ---
+
+type projectsMsg struct {
+	projects []Project
+	err      error
+}
+
+type tasksMsg struct {
+	tasks []Task
+	err   error
+}
+
+type sectionsMsg struct {
+	sections []Section
+	err      error
+}
+
+type labelsMsg struct {
+	labels []Label
+	err    error
+}
+
+type taskClosedMsg struct {
+	taskID string
+	err    error
+}
+
+type taskReopenedMsg struct {
+	taskID string
+	err    error
+}
+
+type taskDeletedMsg struct {
+	taskID string
+	err    error
+}
+
+type taskCreatedMsg struct {
+	task Task
+	err  error
+}
+
+type taskUpdatedMsg struct {
+	task Task
+	err  error
+}
+
+type quickAddMsg struct {
+	err error
+}
+
+type cachedProjectsMsg struct {
+	projects []Project
+}
+
+type cachedTasksMsg struct {
+	tasks []Task
+}
+
+type cachedSectionsMsg struct {
+	sections []Section
+}
+
+type noopMsg struct{}
+
+type commentsMsg struct {
+	comments []Comment
+	err      error
+}
+
+type toastMsg struct {
+	text    string
+	isError bool
+}
+
+type clearToastMsg struct{}
+
+type tickMsg struct{}
+
+// --- Helper functions ---
+
+// formatDue returns a human-readable due date string with color hints
+func formatDue(due *Due) string {
+	if due == nil {
+		return ""
+	}
+	if due.String != "" {
+		return due.String
+	}
+	return due.Date
+}
+
+// isOverdue checks if a due date is in the past
+func isOverdue(due *Due) bool {
+	if due == nil {
+		return false
+	}
+	dateStr := due.Date
+	if dateStr == "" {
+		return false
+	}
+
+	now := time.Now()
+	// Try full-day date first
+	if len(dateStr) == 10 {
+		t, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			return false
+		}
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		return t.Before(today)
+	}
+
+	// Try datetime
+	for _, layout := range []string{
+		"2006-01-02T15:04:05.000000Z",
+		"2006-01-02T15:04:05.000000",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+	} {
+		t, err := time.Parse(layout, dateStr)
+		if err == nil {
+			return t.Before(now)
+		}
+	}
+	return false
+}
+
+// isDueToday checks if a due date is today
+func isDueToday(due *Due) bool {
+	if due == nil {
+		return false
+	}
+	dateStr := due.Date
+	if dateStr == "" {
+		return false
+	}
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	return strings.HasPrefix(dateStr, today)
+}
+
+// priorityLabel returns a display string for priority
+func priorityLabel(p int) string {
+	switch p {
+	case 1:
+		return "p1"
+	case 2:
+		return "p2"
+	case 3:
+		return "p3"
+	default:
+		return ""
+	}
+}
+
+// truncate clips a string to maxLen with ellipsis
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// colorHex maps Todoist color names to hex values
+var colorHex = map[string]string{
+	"berry_red":   "#B8255F",
+	"red":         "#DC4C3E",
+	"orange":      "#C77100",
+	"yellow":      "#B29104",
+	"olive_green": "#949C31",
+	"lime_green":  "#65A33A",
+	"green":       "#369307",
+	"mint_green":  "#42A393",
+	"teal":        "#148FAD",
+	"sky_blue":    "#319DC0",
+	"light_blue":  "#6988A4",
+	"blue":        "#4180FF",
+	"grape":       "#692EC2",
+	"violet":      "#CA3FEE",
+	"lavender":    "#A4698C",
+	"magenta":     "#E05095",
+	"salmon":      "#C9766F",
+	"charcoal":    "#808080",
+	"grey":        "#999999",
+	"taupe":       "#8F7A69",
+}
+
