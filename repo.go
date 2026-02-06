@@ -92,13 +92,13 @@ func (r *Repository) FetchTasks(projectID string) tea.Cmd {
 			if !r.store.IsStale("tasks", projectID) {
 				tasks, err := r.store.GetTasks(projectID)
 				if err == nil {
-					return tasksMsg{tasks: tasks}
+					return tasksMsg{projectID: projectID, tasks: tasks}
 				}
 			}
 
 			tasks, err := r.store.GetTasks(projectID)
 			if err == nil && len(tasks) > 0 {
-				return cachedTasksMsg{tasks: tasks}
+				return cachedTasksMsg{projectID: projectID, tasks: tasks}
 			}
 		}
 
@@ -116,12 +116,12 @@ func (r *Repository) RefreshTasks(projectID string) tea.Cmd {
 func (r *Repository) fetchTasksFromAPI(projectID string) tasksMsg {
 	tasks, err := r.client.GetTasks(context.Background(), projectID)
 	if err != nil {
-		return tasksMsg{err: err}
+		return tasksMsg{projectID: projectID, err: err}
 	}
 	if r.store != nil {
 		_ = r.store.ReplaceTasks(projectID, tasks)
 	}
-	return tasksMsg{tasks: tasks}
+	return tasksMsg{projectID: projectID, tasks: tasks}
 }
 
 // FetchSections returns cached sections instantly if available.
@@ -131,13 +131,13 @@ func (r *Repository) FetchSections(projectID string) tea.Cmd {
 			if !r.store.IsStale("sections", projectID) {
 				sections, err := r.store.GetSections(projectID)
 				if err == nil {
-					return sectionsMsg{sections: sections}
+					return sectionsMsg{projectID: projectID, sections: sections}
 				}
 			}
 
 			sections, err := r.store.GetSections(projectID)
 			if err == nil && len(sections) > 0 {
-				return cachedSectionsMsg{sections: sections}
+				return cachedSectionsMsg{projectID: projectID, sections: sections}
 			}
 		}
 
@@ -155,17 +155,17 @@ func (r *Repository) RefreshSections(projectID string) tea.Cmd {
 func (r *Repository) fetchSectionsFromAPI(projectID string) sectionsMsg {
 	sections, err := r.client.GetSections(context.Background(), projectID)
 	if err != nil {
-		return sectionsMsg{err: err}
+		return sectionsMsg{projectID: projectID, err: err}
 	}
 	if r.store != nil {
 		_ = r.store.ReplaceSections(projectID, sections)
 	}
-	return sectionsMsg{sections: sections}
+	return sectionsMsg{projectID: projectID, sections: sections}
 }
 
 // --- Optimistic mutations ---
 
-// CloseTask optimistically removes a task from cache and enqueues a close mutation.
+// CloseTask optimistically removes a task from cache, saves to completed, and enqueues a close mutation.
 func (r *Repository) CloseTask(taskID string) tea.Cmd {
 	return func() tea.Msg {
 		if IsPendingID(taskID) {
@@ -173,6 +173,11 @@ func (r *Repository) CloseTask(taskID string) tea.Cmd {
 		}
 		snapshot := r.snapshotTask(taskID)
 		if r.store != nil {
+			// Save to completed_tasks before deleting
+			if task, err := r.store.GetTaskByID(taskID); err == nil && task != nil {
+				projectName := r.projectNameForID(task.ProjectID)
+				_ = r.store.SaveCompletedTask(*task, projectName)
+			}
 			_ = r.store.DeleteTask(taskID)
 			_, _ = r.store.EnqueueMutation(Mutation{
 				EntityType: "task",
@@ -184,6 +189,27 @@ func (r *Repository) CloseTask(taskID string) tea.Cmd {
 			})
 		}
 		return taskClosedMsg{taskID: taskID, err: nil}
+	}
+}
+
+// ReopenTask optimistically moves a task from completed back to active cache and enqueues a reopen mutation.
+func (r *Repository) ReopenTask(task Task) tea.Cmd {
+	return func() tea.Msg {
+		if IsPendingID(task.ID) {
+			return toastMsg{text: "Task is still syncing, please wait", isError: true}
+		}
+		if r.store != nil {
+			_ = r.store.UpsertTask(task)
+			_ = r.store.DeleteCompletedTask(task.ID)
+			_, _ = r.store.EnqueueMutation(Mutation{
+				EntityType: "task",
+				EntityID:   task.ID,
+				Action:     MutationReopen,
+				Status:     MutationPending,
+				CreatedAt:  time.Now(),
+			})
+		}
+		return taskReopenedMsg{task: task, err: nil}
 	}
 }
 
@@ -313,6 +339,8 @@ func (r *Repository) FlushNext() tea.Cmd {
 			return r.flushClose(*m)
 		case MutationDelete:
 			return r.flushDelete(*m)
+		case MutationReopen:
+			return r.flushReopen(*m)
 		}
 		return noopMsg{}
 	}
@@ -402,6 +430,20 @@ func (r *Repository) flushClose(m Mutation) tea.Msg {
 
 func (r *Repository) flushDelete(m Mutation) tea.Msg {
 	err := r.client.DeleteTask(context.Background(), m.EntityID)
+	if err != nil {
+		if isNotFoundError(err) {
+			_ = r.store.DeleteMutation(m.ID)
+			return mutationFlushedMsg{mutation: m, err: nil}
+		}
+		_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+		return mutationFlushedMsg{mutation: m, err: err}
+	}
+	_ = r.store.DeleteMutation(m.ID)
+	return mutationFlushedMsg{mutation: m, err: nil}
+}
+
+func (r *Repository) flushReopen(m Mutation) tea.Msg {
+	err := r.client.ReopenTask(context.Background(), m.EntityID)
 	if err != nil {
 		if isNotFoundError(err) {
 			_ = r.store.DeleteMutation(m.ID)
@@ -539,5 +581,138 @@ func (r *Repository) DismissMutation(id int64) tea.Cmd {
 		}
 		_ = r.store.DeleteMutation(id)
 		return mutationEnqueuedMsg{count: r.store.PendingCount()}
+	}
+}
+
+// --- Project operations (direct API, no mutation queue) ---
+
+func (r *Repository) CreateProject(name string) tea.Cmd {
+	return func() tea.Msg {
+		project, err := r.client.CreateProject(context.Background(), createProjectRequest{Name: name})
+		if err != nil {
+			return projectCreatedMsg{err: err}
+		}
+		return projectCreatedMsg{project: project}
+	}
+}
+
+func (r *Repository) ArchiveProject(projectID string) tea.Cmd {
+	return func() tea.Msg {
+		// Save project data before archiving
+		if r.store != nil {
+			projects, _ := r.store.GetProjects()
+			for _, p := range projects {
+				if p.ID == projectID {
+					_ = r.store.SaveArchivedProject(p)
+					break
+				}
+			}
+		}
+		err := r.client.ArchiveProject(context.Background(), projectID)
+		if err != nil {
+			// Remove from archived on failure
+			if r.store != nil {
+				_ = r.store.DeleteArchivedProject(projectID)
+			}
+			return projectArchivedMsg{projectID: projectID, err: err}
+		}
+		// Remove from active projects cache
+		if r.store != nil {
+			_ = r.store.DeleteProject(projectID)
+		}
+		return projectArchivedMsg{projectID: projectID, err: nil}
+	}
+}
+
+func (r *Repository) UnarchiveProject(projectID string) tea.Cmd {
+	return func() tea.Msg {
+		err := r.client.UnarchiveProject(context.Background(), projectID)
+		if err != nil {
+			return projectUnarchivedMsg{err: err}
+		}
+		if r.store != nil {
+			_ = r.store.DeleteArchivedProject(projectID)
+		}
+		// Fetch the unarchived project to return it
+		projects, _ := r.client.GetProjects(context.Background())
+		var found Project
+		for _, p := range projects {
+			if p.ID == projectID {
+				found = p
+				break
+			}
+		}
+		return projectUnarchivedMsg{project: found}
+	}
+}
+
+// --- Completed/Archived access ---
+
+func (r *Repository) GetRecentlyCompleted(limit int) []CompletedTaskRow {
+	if r.store == nil {
+		return nil
+	}
+	rows, _ := r.store.GetRecentlyCompleted(limit)
+	return rows
+}
+
+func (r *Repository) GetArchivedProjects() []Project {
+	if r.store == nil {
+		return nil
+	}
+	projects, _ := r.store.GetArchivedProjects()
+	return projects
+}
+
+func (r *Repository) projectNameForID(projectID string) string {
+	if r.store == nil {
+		return ""
+	}
+	projects, _ := r.store.GetProjects()
+	for _, p := range projects {
+		if p.ID == projectID {
+			return p.Name
+		}
+	}
+	return ""
+}
+
+// --- Background cache warming ---
+
+// FindStaleProjects returns a list of project IDs whose task cache is past TTL.
+func (r *Repository) FindStaleProjects() tea.Cmd {
+	return func() tea.Msg {
+		if r.store == nil {
+			return noopMsg{}
+		}
+		projects, err := r.store.GetProjects()
+		if err != nil || len(projects) == 0 {
+			return noopMsg{}
+		}
+		var stale []string
+		for _, p := range projects {
+			if r.store.IsStale("tasks", p.ID) {
+				stale = append(stale, p.ID)
+			}
+		}
+		if len(stale) == 0 {
+			return noopMsg{}
+		}
+		return backgroundRefreshMsg{staleProjects: stale}
+	}
+}
+
+// BackgroundRefreshProject warms the cache for a single project.
+// It skips projects that have become fresh since queueing (e.g. user navigated there).
+func (r *Repository) BackgroundRefreshProject(projectID string, remaining []string) tea.Cmd {
+	return func() tea.Msg {
+		// Skip if user already loaded this project (it's fresh now)
+		if r.store != nil && !r.store.IsStale("tasks", projectID) {
+			return backgroundRefreshDoneMsg{remaining: remaining}
+		}
+		// Warm cache — call API and update store, discard the returned msg structs
+		r.fetchTasksFromAPI(projectID)
+		r.fetchSectionsFromAPI(projectID)
+		return backgroundRefreshDoneMsg{remaining: remaining}
 	}
 }

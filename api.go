@@ -286,6 +286,34 @@ func (c *Client) GetLabels(ctx context.Context) ([]Label, error) {
 	return all, nil
 }
 
+// --- Project mutations ---
+
+type createProjectRequest struct {
+	Name string `json:"name"`
+}
+
+func (c *Client) CreateProject(ctx context.Context, req createProjectRequest) (Project, error) {
+	data, err := c.doRequest(ctx, "POST", "/projects", req)
+	if err != nil {
+		return Project{}, err
+	}
+	var p Project
+	if err := json.Unmarshal(data, &p); err != nil {
+		return Project{}, fmt.Errorf("decode project: %w", err)
+	}
+	return p, nil
+}
+
+func (c *Client) ArchiveProject(ctx context.Context, projectID string) error {
+	_, err := c.doRequest(ctx, "POST", "/projects/"+projectID+"/archive", nil)
+	return err
+}
+
+func (c *Client) UnarchiveProject(ctx context.Context, projectID string) error {
+	_, err := c.doRequest(ctx, "POST", "/projects/"+projectID+"/unarchive", nil)
+	return err
+}
+
 // --- Comments ---
 
 func (c *Client) GetComments(ctx context.Context, taskID string) ([]Comment, error) {

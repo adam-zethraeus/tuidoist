@@ -73,8 +73,21 @@ CREATE TABLE IF NOT EXISTS mutation_queue (
 	created_at  INTEGER NOT NULL,
 	attempts    INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS completed_tasks (
+	id            TEXT PRIMARY KEY,
+	project_id    TEXT NOT NULL,
+	project_name  TEXT NOT NULL DEFAULT '',
+	data          TEXT NOT NULL,
+	completed_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archived_projects (
+	id          TEXT PRIMARY KEY,
+	data        TEXT NOT NULL,
+	archived_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_sections_project ON sections(project_id);
+CREATE INDEX IF NOT EXISTS idx_completed_project ON completed_tasks(project_id);
 `
 	_, err := db.Exec(ddl)
 	return err
@@ -413,6 +426,112 @@ func (s *Store) queryMutations(query string) ([]Mutation, error) {
 
 type scannable interface {
 	Scan(dest ...any) error
+}
+
+// --- Completed tasks ---
+
+// SaveCompletedTask stores a task as completed with its project context.
+func (s *Store) SaveCompletedTask(task Task, projectName string) error {
+	blob, err := json.Marshal(task)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO completed_tasks (id, project_id, project_name, data, completed_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET data = excluded.data, completed_at = excluded.completed_at`,
+		task.ID, task.ProjectID, projectName, string(blob), time.Now().Unix(),
+	)
+	return err
+}
+
+// GetRecentlyCompleted returns the most recently completed tasks.
+func (s *Store) GetRecentlyCompleted(limit int) ([]CompletedTaskRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, project_id, project_name, data, completed_at
+		 FROM completed_tasks ORDER BY completed_at DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []CompletedTaskRow
+	for rows.Next() {
+		var id, pid, pname, blob string
+		var completedAt int64
+		if err := rows.Scan(&id, &pid, &pname, &blob, &completedAt); err != nil {
+			return nil, err
+		}
+		var t Task
+		if err := json.Unmarshal([]byte(blob), &t); err != nil {
+			continue
+		}
+		result = append(result, CompletedTaskRow{
+			Task:        t,
+			ProjectID:   pid,
+			ProjectName: pname,
+			CompletedAt: time.Unix(completedAt, 0),
+		})
+	}
+	return result, rows.Err()
+}
+
+// DeleteCompletedTask removes a task from the completed list.
+func (s *Store) DeleteCompletedTask(taskID string) error {
+	_, err := s.db.Exec("DELETE FROM completed_tasks WHERE id = ?", taskID)
+	return err
+}
+
+// --- Archived projects ---
+
+// SaveArchivedProject stores an archived project.
+func (s *Store) SaveArchivedProject(p Project) error {
+	blob, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO archived_projects (id, data, archived_at) VALUES (?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
+		p.ID, string(blob), time.Now().Unix(),
+	)
+	return err
+}
+
+// GetArchivedProjects returns all archived projects.
+func (s *Store) GetArchivedProjects() ([]Project, error) {
+	rows, err := s.db.Query("SELECT data FROM archived_projects ORDER BY archived_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		var blob string
+		if err := rows.Scan(&blob); err != nil {
+			return nil, err
+		}
+		var p Project
+		if err := json.Unmarshal([]byte(blob), &p); err != nil {
+			continue
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
+}
+
+// DeleteArchivedProject removes a project from the archived list.
+func (s *Store) DeleteArchivedProject(projectID string) error {
+	_, err := s.db.Exec("DELETE FROM archived_projects WHERE id = ?", projectID)
+	return err
+}
+
+// DeleteProject removes a project from the active projects cache.
+func (s *Store) DeleteProject(projectID string) error {
+	_, err := s.db.Exec("DELETE FROM projects WHERE id = ?", projectID)
+	return err
 }
 
 func scanMutation(row scannable) (*Mutation, error) {

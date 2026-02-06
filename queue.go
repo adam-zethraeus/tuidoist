@@ -174,6 +174,8 @@ func renderMutationLine(m Mutation) string {
 		desc = describeFromSnapshot(m, "Close")
 	case MutationDelete:
 		desc = describeFromSnapshot(m, "Delete")
+	case MutationReopen:
+		desc = describeFromSnapshot(m, "Reopen")
 	}
 
 	return fmt.Sprintf("%s %s", icon, desc)

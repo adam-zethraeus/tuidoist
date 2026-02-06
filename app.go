@@ -28,9 +28,10 @@ type App struct {
 	ready  bool
 
 	// Sub-views
-	projects ProjectsView
-	tasks    TasksView
-	queue    QueueView
+	projects  ProjectsView
+	tasks     TasksView
+	queue     QueueView
+	completed CompletedView
 
 	// Loading state
 	loading bool
@@ -46,8 +47,14 @@ type App struct {
 	// Queue overlay
 	showQueue bool
 
+	// Completed overlay
+	showCompleted bool
+
 	// Track last selected project to detect changes
 	lastProjectID string
+
+	// Background refresh
+	bgRefreshStarted bool
 }
 
 func NewApp(repo *Repository) App {
@@ -56,13 +63,14 @@ func NewApp(repo *Repository) App {
 	s.Style = lipgloss.NewStyle().Foreground(colorBlue)
 
 	return App{
-		repo:     repo,
-		focus:    focusSidebar,
-		projects: NewProjectsView(repo),
-		tasks:    NewTasksView(repo),
-		queue:    NewQueueView(repo),
-		loading:  true,
-		spinner:  s,
+		repo:      repo,
+		focus:     focusSidebar,
+		projects:  NewProjectsView(repo),
+		tasks:     NewTasksView(repo),
+		queue:     NewQueueView(repo),
+		completed: NewCompletedView(repo),
+		loading:   true,
+		spinner:   s,
 	}
 }
 
@@ -104,10 +112,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Completed overlay handles its own input
+		if a.showCompleted {
+			switch msg.String() {
+			case "C", "esc":
+				a.showCompleted = false
+				return a, nil
+			default:
+				var cmd tea.Cmd
+				a.completed, cmd = a.completed.Update(msg)
+				return a, cmd
+			}
+		}
+
 		// Don't handle global keys if a dialog is open
 		if a.tasks.handlesInput() {
 			var cmd tea.Cmd
 			a.tasks, cmd = a.tasks.Update(msg)
+			return a, cmd
+		}
+
+		if a.projects.handlesInput() {
+			var cmd tea.Cmd
+			a.projects, cmd = a.projects.Update(msg)
 			return a, cmd
 		}
 
@@ -120,6 +147,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "?":
 			a.showHelp = !a.showHelp
+			return a, nil
+		case "C":
+			a.showCompleted = true
+			a.completed.SetSize(a.height)
+			a.completed.Refresh()
 			return a, nil
 		case "tab":
 			if a.focus == focusSidebar {
@@ -140,18 +172,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		case "enter":
 			if a.focus == focusSidebar {
-				p := a.projects.SelectedProject()
-				if p != nil && p.ID != a.lastProjectID {
-					a.lastProjectID = p.ID
-					a.loading = true
-					var cmd tea.Cmd
-					a.tasks, cmd = a.tasks.LoadProject(p.ID, p.Name)
-					a.focus = focusTasks
-					a.projects.SetFocused(false)
-					a.tasks.SetFocused(true)
-					return a, cmd
-				}
-				// If same project, just switch focus
+				// Just switch focus — project already loaded on cursor move
 				a.focus = focusTasks
 				a.projects.SetFocused(false)
 				a.tasks.SetFocused(true)
@@ -177,6 +198,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.projects.SetFocused(true)
 			}
 		}
+		// Start background cache warming
+		if !a.bgRefreshStarted {
+			a.bgRefreshStarted = true
+			cmds = append(cmds, a.repo.FindStaleProjects())
+		}
 		return a, tea.Batch(cmds...)
 
 	case projectsMsg:
@@ -197,10 +223,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.projects.SetFocused(true)
 			}
 		}
+		// Start background cache warming
+		if !a.bgRefreshStarted {
+			a.bgRefreshStarted = true
+			cmds = append(cmds, a.repo.FindStaleProjects())
+		}
 		return a, tea.Batch(cmds...)
 
 	case cachedTasksMsg:
-		a.loading = true
 		var cmd tea.Cmd
 		a.tasks, cmd = a.tasks.Update(msg)
 		return a, cmd
@@ -211,7 +241,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case tasksMsg:
-		a.loading = false
+		if msg.projectID == a.tasks.projectID {
+			a.loading = false
+		}
 		var cmd tea.Cmd
 		a.tasks, cmd = a.tasks.Update(msg)
 		return a, cmd
@@ -235,6 +267,53 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, a.repo.FlushNext())
 		return a, tea.Batch(cmds...)
 
+	case taskReopenedMsg:
+		// Route to tasks view (adds back to active list if same project)
+		var cmd tea.Cmd
+		a.tasks, cmd = a.tasks.Update(msg)
+		cmds = append(cmds, cmd)
+		// Refresh completed view if open
+		if a.showCompleted {
+			a.completed.Refresh()
+		}
+		cmds = append(cmds, a.repo.FlushNext())
+		return a, tea.Batch(cmds...)
+
+	case projectCreatedMsg:
+		var cmd tea.Cmd
+		a.projects, cmd = a.projects.Update(msg)
+		return a, cmd
+
+	case projectArchivedMsg:
+		var cmd tea.Cmd
+		a.projects, cmd = a.projects.Update(msg)
+		cmds = append(cmds, cmd)
+		// If current project was archived, switch to first available
+		if msg.err == nil && msg.projectID == a.tasks.projectID {
+			if p := a.projects.SelectedProject(); p != nil {
+				a.lastProjectID = p.ID
+				var taskCmd tea.Cmd
+				a.tasks, taskCmd = a.tasks.LoadProject(p.ID, p.Name)
+				cmds = append(cmds, taskCmd)
+			}
+		}
+		return a, tea.Batch(cmds...)
+
+	case projectUnarchivedMsg:
+		if msg.err != nil {
+			return a, func() tea.Msg {
+				return toastMsg{text: "Failed to unarchive: " + msg.err.Error(), isError: true}
+			}
+		}
+		// Refresh projects list and completed view
+		if a.showCompleted {
+			a.completed.Refresh()
+		}
+		return a, tea.Batch(
+			a.repo.RefreshProjects(),
+			func() tea.Msg { return toastMsg{text: "List unarchived", isError: false} },
+		)
+
 	case mutationConflictMsg:
 		cmds = append(cmds, func() tea.Msg {
 			return toastMsg{text: "Sync conflict — press Q to review", isError: true}
@@ -247,6 +326,31 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case flushNextMsg:
 		return a, a.repo.FlushNext()
+
+	case backgroundRefreshMsg:
+		if len(msg.staleProjects) == 0 {
+			return a, nil
+		}
+		// Split into 2 independent chains for concurrency=2
+		var chain1, chain2 []string
+		for i, pid := range msg.staleProjects {
+			if i%2 == 0 {
+				chain1 = append(chain1, pid)
+			} else {
+				chain2 = append(chain2, pid)
+			}
+		}
+		cmds = append(cmds, a.repo.BackgroundRefreshProject(chain1[0], chain1[1:]))
+		if len(chain2) > 0 {
+			cmds = append(cmds, a.repo.BackgroundRefreshProject(chain2[0], chain2[1:]))
+		}
+		return a, tea.Batch(cmds...)
+
+	case backgroundRefreshDoneMsg:
+		if len(msg.remaining) > 0 {
+			return a, a.repo.BackgroundRefreshProject(msg.remaining[0], msg.remaining[1:])
+		}
+		return a, nil
 
 	case toastMsg:
 		a.toast = msg.text
@@ -268,9 +372,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Delegate to focused view
 	switch a.focus {
 	case focusSidebar:
+		prev := a.projects.SelectedProjectID()
 		var cmd tea.Cmd
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
+		// Auto-load project when sidebar cursor changes
+		if p := a.projects.SelectedProject(); p != nil && p.ID != prev {
+			a.lastProjectID = p.ID
+			var taskCmd tea.Cmd
+			a.tasks, taskCmd = a.tasks.LoadProject(p.ID, p.Name)
+			cmds = append(cmds, taskCmd)
+		}
 	case focusTasks:
 		var cmd tea.Cmd
 		a.tasks, cmd = a.tasks.Update(msg)
@@ -289,6 +401,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, a.repo.FlushNext())
 	}
 
+	// Pass project messages to sidebar when tasks are focused
+	switch msg.(type) {
+	case projectCreatedMsg, projectArchivedMsg:
+		if a.focus != focusSidebar {
+			var cmd tea.Cmd
+			a.projects, cmd = a.projects.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+	}
+
 	return a, tea.Batch(cmds...)
 }
 
@@ -303,6 +425,10 @@ func (a App) View() string {
 
 	if a.showQueue {
 		return a.queue.View(a.width, a.height)
+	}
+
+	if a.showCompleted {
+		return a.completed.View(a.width, a.height)
 	}
 
 	// Header
@@ -389,23 +515,40 @@ func (a App) renderFooter() string {
 			keyHint("esc", "cancel"),
 		)
 	} else if a.focus == focusSidebar {
-		hints = append(hints,
-			keyHint("j/k", "nav"),
-			keyHint("enter", "select"),
-			keyHint("tab", "tasks"),
-			keyHint("?", "help"),
-			keyHint("q", "quit"),
-		)
+		if a.projects.handlesInput() {
+			if a.projects.mode == "add" {
+				hints = append(hints,
+					keyHint("enter", "confirm"),
+					keyHint("esc", "cancel"),
+				)
+			} else {
+				hints = append(hints,
+					keyHint("y", "confirm"),
+					keyHint("n", "cancel"),
+				)
+			}
+		} else {
+			hints = append(hints,
+				keyHint("j/k", "nav"),
+				keyHint("enter/tab", "tasks"),
+				keyHint("a", "add list"),
+				keyHint("d", "archive"),
+				keyHint("C", "completed"),
+				keyHint("?", "help"),
+				keyHint("q", "quit"),
+			)
+		}
 	} else {
 		hints = append(hints,
 			keyHint("j/k", "nav"),
-			keyHint("x", "done"),
+			keyHint("x/space", "toggle"),
 			keyHint("a", "add"),
 			keyHint("A", "quick"),
 			keyHint("e", "edit"),
 			keyHint("s", "due"),
 			keyHint("d", "del"),
 			keyHint("1-4", "prio"),
+			keyHint("C", "completed"),
 			keyHint("Q", "queue"),
 			keyHint("tab", "projects"),
 			keyHint("?", "help"),
@@ -426,11 +569,10 @@ func (a App) renderHelp() string {
 		{"k / ↑", "Move up"},
 		{"g", "Go to top"},
 		{"G", "Go to bottom"},
-		{"tab", "Switch sidebar / tasks"},
-		{"enter", "Select project (sidebar)"},
+		{"tab / enter", "Switch sidebar / tasks"},
 		{"", ""},
 		{"Tasks", ""},
-		{"x / space", "Complete task"},
+		{"x / space", "Toggle done (complete/reopen)"},
 		{"a", "Add new task"},
 		{"A", "Quick add (natural language)"},
 		{"e", "Edit task content"},
@@ -438,8 +580,13 @@ func (a App) renderHelp() string {
 		{"d", "Delete task"},
 		{"1-4", "Set priority (1=highest)"},
 		{"", ""},
+		{"Projects", ""},
+		{"a", "Add new list"},
+		{"d", "Archive list"},
+		{"", ""},
 		{"General", ""},
 		{"r", "Refresh"},
+		{"C", "Recently completed"},
 		{"Q", "Sync queue"},
 		{"?", "Toggle help"},
 		{"q / ctrl+c", "Quit"},

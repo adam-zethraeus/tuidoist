@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -15,11 +16,20 @@ type ProjectsView struct {
 	height   int
 	repo     *Repository
 	focused  bool
+
+	// Dialog state
+	mode     string // "", "add", "archive"
+	addInput textinput.Model
 }
 
 func NewProjectsView(repo *Repository) ProjectsView {
+	ai := textinput.New()
+	ai.Placeholder = "List name..."
+	ai.CharLimit = 200
+
 	return ProjectsView{
-		repo: repo,
+		repo:     repo,
+		addInput: ai,
 	}
 }
 
@@ -59,32 +69,135 @@ func (v ProjectsView) Update(msg tea.Msg) (ProjectsView, tea.Cmd) {
 		}
 		return v, nil
 
+	case projectCreatedMsg:
+		if msg.err != nil {
+			return v, func() tea.Msg {
+				return toastMsg{text: "Failed to create list: " + msg.err.Error(), isError: true}
+			}
+		}
+		return v, tea.Batch(
+			v.repo.RefreshProjects(),
+			func() tea.Msg { return toastMsg{text: "List created", isError: false} },
+		)
+
+	case projectArchivedMsg:
+		if msg.err != nil {
+			return v, func() tea.Msg {
+				return toastMsg{text: "Failed to archive list: " + msg.err.Error(), isError: true}
+			}
+		}
+		// Remove archived project from local list
+		for i, p := range v.projects {
+			if p.ID == msg.projectID {
+				v.projects = append(v.projects[:i], v.projects[i+1:]...)
+				break
+			}
+		}
+		if v.cursor >= len(v.projects) {
+			v.cursor = len(v.projects) - 1
+		}
+		if v.cursor < 0 {
+			v.cursor = 0
+		}
+		return v, func() tea.Msg {
+			return toastMsg{text: "List archived", isError: false}
+		}
+
 	case tea.KeyMsg:
 		if !v.focused {
 			return v, nil
 		}
-		switch msg.String() {
-		case "j", "down":
-			if v.cursor < len(v.projects)-1 {
-				v.cursor++
+		return v.handleKey(msg)
+	}
+
+	// Update text input for non-key messages (e.g. cursor blink)
+	if v.mode == "add" {
+		var cmd tea.Cmd
+		v.addInput, cmd = v.addInput.Update(msg)
+		return v, cmd
+	}
+
+	return v, nil
+}
+
+func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
+	key := msg.String()
+
+	// Dialog mode
+	switch v.mode {
+	case "add":
+		switch key {
+		case "enter":
+			name := strings.TrimSpace(v.addInput.Value())
+			if name == "" {
+				v.mode = ""
+				return v, nil
 			}
-			return v, nil
-		case "k", "up":
-			if v.cursor > 0 {
-				v.cursor--
-			}
-			return v, nil
-		case "g":
-			v.cursor = 0
-			return v, nil
-		case "G":
-			if len(v.projects) > 0 {
-				v.cursor = len(v.projects) - 1
-			}
+			v.mode = ""
+			return v, v.repo.CreateProject(name)
+		case "esc":
+			v.mode = ""
 			return v, nil
 		}
+		var cmd tea.Cmd
+		v.addInput, cmd = v.addInput.Update(msg)
+		return v, cmd
+
+	case "archive":
+		switch key {
+		case "y", "enter":
+			p := v.SelectedProject()
+			if p != nil {
+				v.mode = ""
+				return v, v.repo.ArchiveProject(p.ID)
+			}
+			v.mode = ""
+			return v, nil
+		case "n", "esc":
+			v.mode = ""
+			return v, nil
+		}
+		return v, nil
 	}
+
+	// Normal mode
+	switch key {
+	case "j", "down":
+		if v.cursor < len(v.projects)-1 {
+			v.cursor++
+		}
+		return v, nil
+	case "k", "up":
+		if v.cursor > 0 {
+			v.cursor--
+		}
+		return v, nil
+	case "g":
+		v.cursor = 0
+		return v, nil
+	case "G":
+		if len(v.projects) > 0 {
+			v.cursor = len(v.projects) - 1
+		}
+		return v, nil
+	case "a":
+		v.mode = "add"
+		v.addInput.Reset()
+		v.addInput.Focus()
+		return v, textinput.Blink
+	case "d":
+		p := v.SelectedProject()
+		if p != nil && !p.InboxProject {
+			v.mode = "archive"
+		}
+		return v, nil
+	}
+
 	return v, nil
+}
+
+func (v ProjectsView) handlesInput() bool {
+	return v.mode != ""
 }
 
 func (v ProjectsView) View() string {
@@ -142,12 +255,30 @@ func (v ProjectsView) View() string {
 		}
 	}
 
+	// Dialog overlay
+	if v.mode == "add" {
+		b.WriteString("\n\n")
+		b.WriteString(dialogTitleStyle.Render("New List") + "\n")
+		b.WriteString(v.addInput.View())
+	}
+	if v.mode == "archive" {
+		b.WriteString("\n\n")
+		b.WriteString(dialogTitleStyle.Render("Archive List?") + "\n")
+		name := ""
+		if p := v.SelectedProject(); p != nil {
+			name = p.Name
+		}
+		b.WriteString(taskContentStyle.Render(name) + "\n")
+		b.WriteString(footerKeyStyle.Render("y") + " yes  " + footerKeyStyle.Render("n") + " no")
+	}
+
 	return b.String()
 }
 
 func (v *ProjectsView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
+	v.addInput.Width = width - 6
 }
 
 func (v *ProjectsView) SetFocused(focused bool) {

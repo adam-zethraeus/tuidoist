@@ -13,6 +13,7 @@ type displayItem struct {
 	isSection bool
 	section   *Section
 	task      *Task
+	completed bool
 }
 
 // TasksView displays tasks for the selected project
@@ -39,6 +40,12 @@ type TasksView struct {
 
 	// Scroll offset
 	scrollOffset int
+
+	// Loading state (waiting for async task fetch)
+	loading bool
+
+	// Completed tasks (in-memory, cleared on project switch)
+	completedTasks []Task
 }
 
 func NewTasksView(repo *Repository) TasksView {
@@ -76,11 +83,13 @@ func (v TasksView) LoadProject(projectID, projectName string) (TasksView, tea.Cm
 	v.projectName = projectName
 	v.cursor = 0
 	v.scrollOffset = 0
+	v.completedTasks = nil
 
 	// Sync-load cache for instant display
 	v.tasks = v.repo.GetCachedTasks(projectID)
 	v.sections = v.repo.GetCachedSections(projectID)
 	v.rebuildItems()
+	v.loading = len(v.tasks) == 0
 
 	return v, tea.Batch(
 		v.repo.FetchTasks(projectID),
@@ -91,27 +100,42 @@ func (v TasksView) LoadProject(projectID, projectName string) (TasksView, tea.Cm
 func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 	switch msg := msg.(type) {
 	case cachedTasksMsg:
+		if msg.projectID != v.projectID {
+			return v, nil
+		}
 		v.tasks = msg.tasks
+		v.loading = false
 		v.rebuildItems()
 		return v, v.repo.RefreshTasks(v.projectID)
 
 	case cachedSectionsMsg:
+		if msg.projectID != v.projectID {
+			return v, nil
+		}
 		v.sections = msg.sections
 		v.rebuildItems()
 		return v, v.repo.RefreshSections(v.projectID)
 
 	case tasksMsg:
+		if msg.projectID != v.projectID {
+			return v, nil
+		}
 		if msg.err != nil {
+			v.loading = false
 			return v, func() tea.Msg {
 				return toastMsg{text: "Failed to load tasks: " + msg.err.Error(), isError: true}
 			}
 		}
 		v.tasks = msg.tasks
+		v.loading = false
 		v.rebuildItems()
 		v.clampCursor()
 		return v, nil
 
 	case sectionsMsg:
+		if msg.projectID != v.projectID {
+			return v, nil
+		}
 		if msg.err != nil {
 			return v, nil
 		}
@@ -126,9 +150,10 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 				return toastMsg{text: "Failed to complete task: " + msg.err.Error(), isError: true}
 			}
 		}
-		// Remove completed task from list
+		// Move task to completedTasks (shown at bottom with strikethrough)
 		for i, t := range v.tasks {
 			if t.ID == msg.taskID {
+				v.completedTasks = append(v.completedTasks, v.tasks[i])
 				v.tasks = append(v.tasks[:i], v.tasks[i+1:]...)
 				break
 			}
@@ -137,6 +162,27 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 		v.clampCursor()
 		return v, func() tea.Msg {
 			return toastMsg{text: "Task completed", isError: false}
+		}
+
+	case taskReopenedMsg:
+		if msg.err != nil {
+			return v, func() tea.Msg {
+				return toastMsg{text: "Failed to reopen task: " + msg.err.Error(), isError: true}
+			}
+		}
+		// Move from completedTasks back to active if same project
+		for i, t := range v.completedTasks {
+			if t.ID == msg.task.ID {
+				v.completedTasks = append(v.completedTasks[:i], v.completedTasks[i+1:]...)
+				break
+			}
+		}
+		if msg.task.ProjectID == v.projectID {
+			v.tasks = append(v.tasks, msg.task)
+		}
+		v.rebuildItems()
+		return v, func() tea.Msg {
+			return toastMsg{text: "Task reopened", isError: false}
 		}
 
 	case taskDeletedMsg:
@@ -360,9 +406,12 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 		}
 		return v, nil
 	case "x", " ":
-		task := v.selectedTask()
-		if task != nil {
-			return v, v.repo.CloseTask(task.ID)
+		item := v.selectedItem()
+		if item != nil && item.task != nil {
+			if item.completed {
+				return v, v.repo.ReopenTask(*item.task)
+			}
+			return v, v.repo.CloseTask(item.task.ID)
 		}
 	case "a":
 		v.mode = "add"
@@ -414,6 +463,14 @@ func (v TasksView) View() string {
 	if v.projectID == "" {
 		return emptyStyle.Render("Select a project")
 	}
+	if v.loading {
+		return lipgloss.NewStyle().
+			Foreground(colorBright).
+			Bold(true).
+			Padding(0, 0, 1, 0).
+			Render(v.projectName) + "\n" +
+			emptyStyle.Render("Loading tasks...")
+	}
 	if len(v.items) == 0 && len(v.tasks) == 0 {
 		content := emptyStyle.Render("No tasks - press 'a' to add one")
 		if v.mode != "" {
@@ -456,7 +513,7 @@ func (v TasksView) View() string {
 		task := item.task
 		selected := i == v.cursor && v.focused
 
-		line := v.renderTask(task, selected)
+		line := v.renderTask(task, selected, item.completed)
 		b.WriteString(line)
 		if i < end-1 {
 			b.WriteString("\n")
@@ -472,11 +529,11 @@ func (v TasksView) View() string {
 	return b.String()
 }
 
-func (v TasksView) renderTask(task *Task, selected bool) string {
+func (v TasksView) renderTask(task *Task, selected bool, completed bool) string {
 	var parts []string
 
 	// Checkbox
-	parts = append(parts, styledCheckbox(false, task.Priority))
+	parts = append(parts, styledCheckbox(completed, task.Priority))
 
 	// Content
 	maxContentWidth := v.width - 20
@@ -484,7 +541,9 @@ func (v TasksView) renderTask(task *Task, selected bool) string {
 		maxContentWidth = 20
 	}
 	content := truncate(task.Content, maxContentWidth)
-	if selected {
+	if completed {
+		content = taskCompletedStyle.Render(content)
+	} else if selected {
 		content = lipgloss.NewStyle().Foreground(colorBright).Bold(true).Render(content)
 	} else {
 		content = taskContentStyle.Render(content)
@@ -626,6 +685,15 @@ func (v *TasksView) rebuildItems() {
 			v.items = append(v.items, displayItem{task: &tasks[j]})
 		}
 	}
+
+	// Add completed tasks at the bottom
+	if len(v.completedTasks) > 0 {
+		completedSection := Section{Name: "Completed"}
+		v.items = append(v.items, displayItem{isSection: true, section: &completedSection})
+		for i := range v.completedTasks {
+			v.items = append(v.items, displayItem{task: &v.completedTasks[i], completed: true})
+		}
+	}
 }
 
 func (v *TasksView) clampCursor() {
@@ -695,6 +763,13 @@ func (v *TasksView) clampCursorSimple() {
 func (v TasksView) selectedTask() *Task {
 	if v.cursor >= 0 && v.cursor < len(v.items) && !v.items[v.cursor].isSection {
 		return v.items[v.cursor].task
+	}
+	return nil
+}
+
+func (v TasksView) selectedItem() *displayItem {
+	if v.cursor >= 0 && v.cursor < len(v.items) && !v.items[v.cursor].isSection {
+		return &v.items[v.cursor]
 	}
 	return nil
 }

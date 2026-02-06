@@ -200,6 +200,11 @@ var (
 				Foreground(colorRed).
 				Bold(true)
 
+	// Completed task (strikethrough + dim)
+	taskCompletedStyle = lipgloss.NewStyle().
+				Foreground(colorTextDim).
+				Strikethrough(true)
+
 	// Queue view
 	queueTitleStyle = lipgloss.NewStyle().
 			Foreground(colorBlue).

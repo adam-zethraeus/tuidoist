@@ -94,6 +94,7 @@ const (
 	MutationUpdate MutationAction = "update"
 	MutationClose  MutationAction = "close"
 	MutationDelete MutationAction = "delete"
+	MutationReopen MutationAction = "reopen"
 )
 
 type MutationStatus string
@@ -135,13 +136,15 @@ type projectsMsg struct {
 }
 
 type tasksMsg struct {
-	tasks []Task
-	err   error
+	projectID string
+	tasks     []Task
+	err       error
 }
 
 type sectionsMsg struct {
-	sections []Section
-	err      error
+	projectID string
+	sections  []Section
+	err       error
 }
 
 type labelsMsg struct {
@@ -155,8 +158,8 @@ type taskClosedMsg struct {
 }
 
 type taskReopenedMsg struct {
-	taskID string
-	err    error
+	task Task
+	err  error
 }
 
 type taskDeletedMsg struct {
@@ -183,11 +186,13 @@ type cachedProjectsMsg struct {
 }
 
 type cachedTasksMsg struct {
-	tasks []Task
+	projectID string
+	tasks     []Task
 }
 
 type cachedSectionsMsg struct {
-	sections []Section
+	projectID string
+	sections  []Section
 }
 
 type noopMsg struct{}
@@ -203,9 +208,39 @@ type mutationConflictMsg struct {
 }
 type flushNextMsg struct{}
 
+type backgroundRefreshMsg struct {
+	staleProjects []string
+}
+type backgroundRefreshDoneMsg struct {
+	remaining []string
+}
+
 type commentsMsg struct {
 	comments []Comment
 	err      error
+}
+
+type projectCreatedMsg struct {
+	project Project
+	err     error
+}
+
+type projectArchivedMsg struct {
+	projectID string
+	err       error
+}
+
+type projectUnarchivedMsg struct {
+	project Project
+	err     error
+}
+
+// CompletedTaskRow holds a completed task with its project context.
+type CompletedTaskRow struct {
+	Task        Task
+	ProjectID   string
+	ProjectName string
+	CompletedAt time.Time
 }
 
 type toastMsg struct {
