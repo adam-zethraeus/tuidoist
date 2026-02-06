@@ -76,9 +76,11 @@ func (v TasksView) LoadProject(projectID, projectName string) (TasksView, tea.Cm
 	v.projectName = projectName
 	v.cursor = 0
 	v.scrollOffset = 0
-	v.tasks = nil
-	v.sections = nil
-	v.items = nil
+
+	// Sync-load cache for instant display
+	v.tasks = v.repo.GetCachedTasks(projectID)
+	v.sections = v.repo.GetCachedSections(projectID)
+	v.rebuildItems()
 
 	return v, tea.Batch(
 		v.repo.FetchTasks(projectID),

@@ -61,6 +61,18 @@ CREATE TABLE IF NOT EXISTS labels (
 	id   TEXT PRIMARY KEY,
 	data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mutation_queue (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	entity_type TEXT NOT NULL,
+	entity_id   TEXT NOT NULL,
+	action      TEXT NOT NULL,
+	payload     TEXT NOT NULL DEFAULT '',
+	snapshot    TEXT NOT NULL DEFAULT '',
+	status      TEXT NOT NULL DEFAULT 'pending',
+	conflict    TEXT NOT NULL DEFAULT '',
+	created_at  INTEGER NOT NULL,
+	attempts    INTEGER NOT NULL DEFAULT 0
+);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_sections_project ON sections(project_id);
 `
@@ -281,4 +293,138 @@ func (s *Store) ReplaceSections(projectID string, sections []Section) error {
 
 	s.TouchSync("sections", projectID)
 	return tx.Commit()
+}
+
+// --- Single task lookup ---
+
+// GetTaskByID returns a single cached task by ID.
+func (s *Store) GetTaskByID(taskID string) (*Task, error) {
+	var blob string
+	err := s.db.QueryRow("SELECT data FROM tasks WHERE id = ?", taskID).Scan(&blob)
+	if err != nil {
+		return nil, err
+	}
+	var t Task
+	if err := json.Unmarshal([]byte(blob), &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// --- Mutation queue ---
+
+// EnqueueMutation inserts a mutation into the queue and returns its ID.
+func (s *Store) EnqueueMutation(m Mutation) (int64, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO mutation_queue (entity_type, entity_id, action, payload, snapshot, status, conflict, created_at, attempts)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.EntityType, m.EntityID, string(m.Action), m.Payload, m.Snapshot,
+		string(m.Status), m.Conflict, m.CreatedAt.Unix(), m.Attempts,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// NextPendingMutation returns the oldest mutation with status=pending.
+func (s *Store) NextPendingMutation() (*Mutation, error) {
+	row := s.db.QueryRow(
+		`SELECT id, entity_type, entity_id, action, payload, snapshot, status, conflict, created_at, attempts
+		 FROM mutation_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 1`,
+	)
+	return scanMutation(row)
+}
+
+// UpdateMutationStatus updates a mutation's status and conflict description.
+func (s *Store) UpdateMutationStatus(id int64, status MutationStatus, conflict string) error {
+	_, err := s.db.Exec(
+		"UPDATE mutation_queue SET status = ?, conflict = ? WHERE id = ?",
+		string(status), conflict, id,
+	)
+	return err
+}
+
+// IncrementMutationAttempts increments the attempt counter for a mutation.
+func (s *Store) IncrementMutationAttempts(id int64) error {
+	_, err := s.db.Exec("UPDATE mutation_queue SET attempts = attempts + 1 WHERE id = ?", id)
+	return err
+}
+
+// DeleteMutation removes a mutation from the queue.
+func (s *Store) DeleteMutation(id int64) error {
+	_, err := s.db.Exec("DELETE FROM mutation_queue WHERE id = ?", id)
+	return err
+}
+
+// PendingCount returns the number of pending mutations.
+func (s *Store) PendingCount() int {
+	var count int
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM mutation_queue WHERE status = 'pending'").Scan(&count)
+	return count
+}
+
+// FlushingCount returns the number of currently-flushing mutations.
+func (s *Store) FlushingCount() int {
+	var count int
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM mutation_queue WHERE status = 'flushing'").Scan(&count)
+	return count
+}
+
+// ConflictCount returns the number of conflicted mutations.
+func (s *Store) ConflictCount() int {
+	var count int
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM mutation_queue WHERE status = 'conflicted'").Scan(&count)
+	return count
+}
+
+// GetConflictedMutations returns all conflicted mutations.
+func (s *Store) GetConflictedMutations() ([]Mutation, error) {
+	return s.queryMutations("SELECT id, entity_type, entity_id, action, payload, snapshot, status, conflict, created_at, attempts FROM mutation_queue WHERE status = 'conflicted' ORDER BY id ASC")
+}
+
+// GetAllMutations returns all mutations (for queue view).
+func (s *Store) GetAllMutations() ([]Mutation, error) {
+	return s.queryMutations("SELECT id, entity_type, entity_id, action, payload, snapshot, status, conflict, created_at, attempts FROM mutation_queue ORDER BY id ASC")
+}
+
+func (s *Store) queryMutations(query string) ([]Mutation, error) {
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var mutations []Mutation
+	for rows.Next() {
+		var m Mutation
+		var action, status string
+		var createdAt int64
+		if err := rows.Scan(&m.ID, &m.EntityType, &m.EntityID, &action, &m.Payload, &m.Snapshot, &status, &m.Conflict, &createdAt, &m.Attempts); err != nil {
+			return nil, err
+		}
+		m.Action = MutationAction(action)
+		m.Status = MutationStatus(status)
+		m.CreatedAt = time.Unix(createdAt, 0)
+		mutations = append(mutations, m)
+	}
+	return mutations, rows.Err()
+}
+
+type scannable interface {
+	Scan(dest ...any) error
+}
+
+func scanMutation(row scannable) (*Mutation, error) {
+	var m Mutation
+	var action, status string
+	var createdAt int64
+	err := row.Scan(&m.ID, &m.EntityType, &m.EntityID, &action, &m.Payload, &m.Snapshot, &status, &m.Conflict, &createdAt, &m.Attempts)
+	if err != nil {
+		return nil, err
+	}
+	m.Action = MutationAction(action)
+	m.Status = MutationStatus(status)
+	m.CreatedAt = time.Unix(createdAt, 0)
+	return &m, nil
 }

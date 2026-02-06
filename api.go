@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -208,6 +209,25 @@ func (c *Client) UpdateTask(ctx context.Context, taskID string, req updateTaskRe
 		return Task{}, fmt.Errorf("decode task: %w", err)
 	}
 	return task, nil
+}
+
+func (c *Client) GetTask(ctx context.Context, taskID string) (Task, error) {
+	data, err := c.doRequest(ctx, "GET", "/tasks/"+taskID, nil)
+	if err != nil {
+		return Task{}, err
+	}
+	var task Task
+	if err := json.Unmarshal(data, &task); err != nil {
+		return Task{}, fmt.Errorf("decode task: %w", err)
+	}
+	return task, nil
+}
+
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "API error 404")
 }
 
 func (c *Client) CloseTask(ctx context.Context, taskID string) error {

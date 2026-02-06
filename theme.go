@@ -191,6 +191,30 @@ var (
 	// Recurring indicator
 	recurringStyle = lipgloss.NewStyle().
 			Foreground(colorCyan)
+
+	// Sync indicator
+	syncPendingStyle = lipgloss.NewStyle().
+				Foreground(colorYellow)
+
+	syncConflictStyle = lipgloss.NewStyle().
+				Foreground(colorRed).
+				Bold(true)
+
+	// Queue view
+	queueTitleStyle = lipgloss.NewStyle().
+			Foreground(colorBlue).
+			Bold(true)
+
+	queueItemStyle = lipgloss.NewStyle().
+			Foreground(colorText)
+
+	queueConflictStyle = lipgloss.NewStyle().
+				Foreground(colorRed)
+
+	queueSelectedStyle = lipgloss.NewStyle().
+				Background(colorBgHL).
+				Foreground(colorBright).
+				Bold(true)
 )
 
 // keyHint renders a styled key shortcut for footer

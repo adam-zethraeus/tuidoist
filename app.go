@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type App struct {
 	// Sub-views
 	projects ProjectsView
 	tasks    TasksView
+	queue    QueueView
 
 	// Loading state
 	loading bool
@@ -40,6 +42,9 @@ type App struct {
 
 	// Help overlay
 	showHelp bool
+
+	// Queue overlay
+	showQueue bool
 
 	// Track last selected project to detect changes
 	lastProjectID string
@@ -55,6 +60,7 @@ func NewApp(repo *Repository) App {
 		focus:    focusSidebar,
 		projects: NewProjectsView(repo),
 		tasks:    NewTasksView(repo),
+		queue:    NewQueueView(repo),
 		loading:  true,
 		spinner:  s,
 	}
@@ -64,6 +70,7 @@ func (a App) Init() tea.Cmd {
 	return tea.Batch(
 		a.spinner.Tick,
 		a.projects.Init(),
+		a.repo.FlushNext(),
 	)
 }
 
@@ -84,6 +91,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 
+		// Queue overlay handles its own input
+		if a.showQueue {
+			switch msg.String() {
+			case "Q", "esc":
+				a.showQueue = false
+				return a, nil
+			default:
+				var cmd tea.Cmd
+				a.queue, cmd = a.queue.Update(msg)
+				return a, cmd
+			}
+		}
+
 		// Don't handle global keys if a dialog is open
 		if a.tasks.handlesInput() {
 			var cmd tea.Cmd
@@ -94,6 +114,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q":
 			return a, tea.Quit
+		case "Q":
+			a.showQueue = true
+			a.queue.Refresh()
+			return a, nil
 		case "?":
 			a.showHelp = !a.showHelp
 			return a, nil
@@ -108,6 +132,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "r":
 			// Refresh — force API fetch
+			a.loading = true
 			return a, tea.Batch(
 				a.repo.RefreshProjects(),
 				a.repo.RefreshTasks(a.tasks.projectID),
@@ -118,6 +143,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				p := a.projects.SelectedProject()
 				if p != nil && p.ID != a.lastProjectID {
 					a.lastProjectID = p.ID
+					a.loading = true
 					var cmd tea.Cmd
 					a.tasks, cmd = a.tasks.LoadProject(p.ID, p.Name)
 					a.focus = focusTasks
@@ -134,7 +160,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case cachedProjectsMsg:
-		a.loading = false
+		a.loading = true
 		var cmd tea.Cmd
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
@@ -173,6 +199,55 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(cmds...)
 
+	case cachedTasksMsg:
+		a.loading = true
+		var cmd tea.Cmd
+		a.tasks, cmd = a.tasks.Update(msg)
+		return a, cmd
+
+	case cachedSectionsMsg:
+		var cmd tea.Cmd
+		a.tasks, cmd = a.tasks.Update(msg)
+		return a, cmd
+
+	case tasksMsg:
+		a.loading = false
+		var cmd tea.Cmd
+		a.tasks, cmd = a.tasks.Update(msg)
+		return a, cmd
+
+	case sectionsMsg:
+		var cmd tea.Cmd
+		a.tasks, cmd = a.tasks.Update(msg)
+		return a, cmd
+
+	case mutationFlushedMsg:
+		if msg.err != nil {
+			cmds = append(cmds, func() tea.Msg {
+				return toastMsg{text: "Sync failed: " + msg.err.Error(), isError: true}
+			})
+		}
+		// If a create was flushed, refresh task list to get the real ID
+		if msg.mutation.Action == MutationCreate && msg.err == nil {
+			cmds = append(cmds, a.repo.RefreshTasks(a.tasks.projectID))
+		}
+		// Chain: flush next mutation
+		cmds = append(cmds, a.repo.FlushNext())
+		return a, tea.Batch(cmds...)
+
+	case mutationConflictMsg:
+		cmds = append(cmds, func() tea.Msg {
+			return toastMsg{text: "Sync conflict — press Q to review", isError: true}
+		})
+		return a, tea.Batch(cmds...)
+
+	case mutationEnqueuedMsg:
+		// Sync indicator will update on next render
+		return a, nil
+
+	case flushNextMsg:
+		return a, a.repo.FlushNext()
+
 	case toastMsg:
 		a.toast = msg.text
 		a.toastError = msg.isError
@@ -202,20 +277,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
-	// Also pass messages to non-focused views for data updates
+	// Pass mutation results to tasks view even when sidebar is focused
 	switch msg.(type) {
-	case tasksMsg, sectionsMsg, cachedTasksMsg, cachedSectionsMsg, taskClosedMsg, taskDeletedMsg, taskCreatedMsg, taskUpdatedMsg, quickAddMsg:
+	case taskClosedMsg, taskDeletedMsg, taskCreatedMsg, taskUpdatedMsg, quickAddMsg:
 		if a.focus != focusTasks {
 			var cmd tea.Cmd
 			a.tasks, cmd = a.tasks.Update(msg)
 			cmds = append(cmds, cmd)
 		}
-	case projectsMsg, cachedProjectsMsg:
-		if a.focus != focusSidebar {
-			var cmd tea.Cmd
-			a.projects, cmd = a.projects.Update(msg)
-			cmds = append(cmds, cmd)
-		}
+		// Trigger flush after optimistic mutations
+		cmds = append(cmds, a.repo.FlushNext())
 	}
 
 	return a, tea.Batch(cmds...)
@@ -228,6 +299,10 @@ func (a App) View() string {
 
 	if a.showHelp {
 		return a.renderHelp()
+	}
+
+	if a.showQueue {
+		return a.queue.View(a.width, a.height)
 	}
 
 	// Header
@@ -259,6 +334,18 @@ func (a App) View() string {
 func (a App) renderHeader() string {
 	logo := headerStyle.Render("❏ Todoist")
 
+	// Sync indicator
+	var syncIndicator string
+	if pending := a.repo.PendingCount(); pending > 0 {
+		syncIndicator = syncPendingStyle.Render(fmt.Sprintf("↑ %d pending", pending))
+	}
+	if conflicts := a.repo.ConflictCount(); conflicts > 0 {
+		if syncIndicator != "" {
+			syncIndicator += " "
+		}
+		syncIndicator += syncConflictStyle.Render(fmt.Sprintf("⚠ %d conflicts", conflicts))
+	}
+
 	var right string
 	if a.loading {
 		right = a.spinner.View() + " Loading..."
@@ -267,6 +354,15 @@ func (a App) renderHeader() string {
 			right = toastErrorStyle.Render("✗ " + a.toast)
 		} else {
 			right = toastSuccessStyle.Render("✓ " + a.toast)
+		}
+	}
+
+	// Combine sync indicator and status
+	if syncIndicator != "" {
+		if right != "" {
+			right = syncIndicator + "  " + right
+		} else {
+			right = syncIndicator
 		}
 	}
 
@@ -310,6 +406,7 @@ func (a App) renderFooter() string {
 			keyHint("s", "due"),
 			keyHint("d", "del"),
 			keyHint("1-4", "prio"),
+			keyHint("Q", "queue"),
 			keyHint("tab", "projects"),
 			keyHint("?", "help"),
 		)
@@ -343,6 +440,7 @@ func (a App) renderHelp() string {
 		{"", ""},
 		{"General", ""},
 		{"r", "Refresh"},
+		{"Q", "Sync queue"},
 		{"?", "Toggle help"},
 		{"q / ctrl+c", "Quit"},
 	}

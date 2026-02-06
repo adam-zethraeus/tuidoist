@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const cacheTTL = 2 * time.Minute
+const cacheTTL = 1 * time.Hour
 
 func main() {
 	token := os.Getenv("TODOIST_API_TOKEN")

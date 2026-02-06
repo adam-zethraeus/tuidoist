@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // API response wrapper for paginated endpoints
@@ -83,6 +85,48 @@ type Comment struct {
 	PostedAt  string  `json:"posted_at"`
 }
 
+// --- Mutation types ---
+
+type MutationAction string
+
+const (
+	MutationCreate MutationAction = "create"
+	MutationUpdate MutationAction = "update"
+	MutationClose  MutationAction = "close"
+	MutationDelete MutationAction = "delete"
+)
+
+type MutationStatus string
+
+const (
+	MutationPending    MutationStatus = "pending"
+	MutationFlushing   MutationStatus = "flushing"
+	MutationConflicted MutationStatus = "conflicted"
+)
+
+type Mutation struct {
+	ID         int64
+	EntityType string         // "task"
+	EntityID   string         // task ID (or temp ID for creates)
+	Action     MutationAction
+	Payload    string         // JSON of the request (createTaskRequest or updateTaskRequest)
+	Snapshot   string         // JSON of entity state at mutation time (empty for creates)
+	Status     MutationStatus
+	Conflict   string         // JSON description of conflict (empty if none)
+	CreatedAt  time.Time
+	Attempts   int
+}
+
+// NewPendingID returns a temporary ID for optimistically created entities.
+func NewPendingID() string {
+	return "pending-" + uuid.New().String()
+}
+
+// IsPendingID checks if an ID is a temporary pending ID.
+func IsPendingID(id string) bool {
+	return strings.HasPrefix(id, "pending-")
+}
+
 // --- Message types for async Bubbletea commands ---
 
 type projectsMsg struct {
@@ -147,6 +191,17 @@ type cachedSectionsMsg struct {
 }
 
 type noopMsg struct{}
+
+type mutationEnqueuedMsg struct{ count int }
+type mutationFlushedMsg struct {
+	mutation Mutation
+	err      error
+}
+type mutationConflictMsg struct {
+	mutation Mutation
+	conflict string
+}
+type flushNextMsg struct{}
 
 type commentsMsg struct {
 	comments []Comment
