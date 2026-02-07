@@ -32,6 +32,77 @@ func (v *QueueView) Refresh() {
 
 func (v QueueView) Update(msg tea.Msg) (QueueView, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		m := tea.MouseEvent(msg)
+		if m.Action == tea.MouseActionMotion || m.Action == tea.MouseActionRelease {
+			return v, nil
+		}
+		// Scroll wheel
+		if m.Button == tea.MouseButtonWheelDown {
+			if v.cursor < len(v.mutations)-1 {
+				v.cursor++
+			}
+			return v, nil
+		}
+		if m.Button == tea.MouseButtonWheelUp {
+			if v.cursor > 0 {
+				v.cursor--
+			}
+			return v, nil
+		}
+		// Left click
+		if m.Button == tea.MouseButtonLeft {
+			// helpStyle has Padding(1,2): 1 row top pad, then title, MarginBottom(1), blank line
+			contentY := m.Y - 4
+			if contentY < 0 {
+				return v, nil
+			}
+
+			// Walk groups same as View() to build line-to-index map
+			var pending, conflicted []indexedMutation
+			for i, mt := range v.mutations {
+				im := indexedMutation{index: i, mutation: mt}
+				if mt.Status == MutationConflicted {
+					conflicted = append(conflicted, im)
+				} else {
+					pending = append(pending, im)
+				}
+			}
+
+			line := 0
+			if len(pending) > 0 {
+				line++ // section header
+				for _, im := range pending {
+					if line == contentY {
+						v.cursor = im.index
+						return v, nil
+					}
+					line++ // item line
+					if im.index == v.cursor {
+						// selected items don't have extra lines in pending
+					}
+				}
+				line++ // blank line after section
+			}
+			if len(conflicted) > 0 {
+				line++ // section header
+				for _, im := range conflicted {
+					if line == contentY {
+						v.cursor = im.index
+						return v, nil
+					}
+					line++ // item line
+					if im.mutation.Conflict != "" {
+						line++ // conflict detail line
+					}
+					if im.index == v.cursor {
+						line++ // action hints line
+					}
+				}
+			}
+		}
+		return v, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "j", "down":

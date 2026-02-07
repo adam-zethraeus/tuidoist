@@ -93,6 +93,69 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.updateSizes()
 		return a, nil
 
+	case tea.MouseMsg:
+		m := tea.MouseEvent(msg)
+
+		// Filter out motion and release events
+		if m.Action == tea.MouseActionMotion || m.Action == tea.MouseActionRelease {
+			return a, nil
+		}
+
+		// Ignore mouse if a dialog is active
+		if a.tasks.handlesInput() || a.projects.handlesInput() {
+			return a, nil
+		}
+
+		// Ignore mouse on help overlay (no interactable items)
+		if a.showHelp {
+			return a, nil
+		}
+
+		// Queue overlay
+		if a.showQueue {
+			var cmd tea.Cmd
+			a.queue, cmd = a.queue.Update(msg)
+			return a, cmd
+		}
+
+		// Completed overlay
+		if a.showCompleted {
+			var cmd tea.Cmd
+			a.completed, cmd = a.completed.Update(msg)
+			return a, cmd
+		}
+
+		// Ignore clicks on header and footer
+		if m.Y == 0 || m.Y >= a.height-1 {
+			return a, nil
+		}
+
+		// Route to sidebar vs tasks
+		if m.X < sidebarWidth {
+			a.focus = focusSidebar
+			a.projects.SetFocused(true)
+			a.tasks.SetFocused(false)
+
+			prev := a.projects.SelectedProjectID()
+			a.projects, _ = a.projects.HandleMouse(m, 1)
+
+			// Auto-load project if cursor changed
+			if p := a.projects.SelectedProject(); p != nil && p.ID != prev {
+				a.lastProjectID = p.ID
+				var taskCmd tea.Cmd
+				a.tasks, taskCmd = a.tasks.LoadProject(p.ID, p.Name)
+				return a, taskCmd
+			}
+			return a, nil
+		}
+
+		// Tasks area
+		a.focus = focusTasks
+		a.tasks.SetFocused(true)
+		a.projects.SetFocused(false)
+		a.tasks, _ = a.tasks.HandleMouse(m, 1)
+		return a, nil
+
 	case tea.KeyMsg:
 		// Always handle quit
 		if msg.String() == "ctrl+c" {

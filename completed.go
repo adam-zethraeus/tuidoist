@@ -109,6 +109,77 @@ func (v *CompletedView) rebuildItems() {
 
 func (v CompletedView) Update(msg tea.Msg) (CompletedView, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		m := tea.MouseEvent(msg)
+		if m.Action == tea.MouseActionMotion || m.Action == tea.MouseActionRelease {
+			return v, nil
+		}
+		// Scroll wheel
+		if m.Button == tea.MouseButtonWheelDown {
+			if v.cursor < len(v.items)-1 {
+				v.cursor++
+				if v.cursor < len(v.items) && v.items[v.cursor].kind == ciSectionHeader {
+					if v.cursor < len(v.items)-1 {
+						v.cursor++
+					}
+				}
+			}
+			v.ensureVisible(v.height)
+			return v, nil
+		}
+		if m.Button == tea.MouseButtonWheelUp {
+			if v.cursor > 0 {
+				v.cursor--
+				if v.cursor >= 0 && v.items[v.cursor].kind == ciSectionHeader {
+					if v.cursor > 0 {
+						v.cursor--
+					}
+				}
+			}
+			v.ensureVisible(v.height)
+			return v, nil
+		}
+		// Left click
+		if m.Button == tea.MouseButtonLeft {
+			// helpStyle has Padding(1,2): 1 row top pad, then title, MarginBottom(1), blank line
+			contentY := m.Y - 4
+			if contentY < 0 {
+				return v, nil
+			}
+
+			// Walk visible items tracking rendered lines
+			visibleHeight := v.height - 8
+			if visibleHeight < 1 {
+				visibleHeight = 1
+			}
+			end := v.scrollOffset + visibleHeight
+			if end > len(v.items) {
+				end = len(v.items)
+			}
+
+			line := 0
+			for i := v.scrollOffset; i < end; i++ {
+				item := v.items[i]
+				if item.kind == ciSectionHeader {
+					// Section headers render as blank line + header text = 2 lines
+					if line == contentY || line+1 == contentY {
+						// Don't select section headers, but consume the lines
+						line += 2
+						continue
+					}
+					line += 2
+					continue
+				}
+				if line == contentY {
+					v.cursor = i
+					v.ensureVisible(v.height)
+					return v, nil
+				}
+				line++
+			}
+		}
+		return v, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "j", "down":

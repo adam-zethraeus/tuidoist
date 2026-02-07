@@ -309,6 +309,56 @@ func (v ProjectsView) SelectedProjectID() string {
 	return ""
 }
 
+// HandleMouse processes mouse events for the sidebar.
+func (v ProjectsView) HandleMouse(m tea.MouseEvent, yOffset int) (ProjectsView, tea.Cmd) {
+	if m.Action == tea.MouseActionMotion || m.Action == tea.MouseActionRelease {
+		return v, nil
+	}
+
+	// Scroll wheel
+	if m.Button == tea.MouseButtonWheelDown {
+		if v.cursor < len(v.projects)-1 {
+			v.cursor++
+		}
+		return v, nil
+	}
+	if m.Button == tea.MouseButtonWheelUp {
+		if v.cursor > 0 {
+			v.cursor--
+		}
+		return v, nil
+	}
+
+	// Left click
+	if m.Button != tea.MouseButtonLeft {
+		return v, nil
+	}
+
+	localY := m.Y - yOffset  // subtract header row
+	itemOffset := localY - 2 // subtract title + margin
+
+	// Recompute scroll window (same as View)
+	maxVisible := v.height - 3
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+	start := 0
+	if v.cursor >= maxVisible {
+		start = v.cursor - maxVisible + 1
+	}
+	end := start + maxVisible
+	if end > len(v.projects) {
+		end = len(v.projects)
+	}
+
+	clickedIndex := start + itemOffset
+	if clickedIndex >= start && clickedIndex < end {
+		v.cursor = clickedIndex
+	}
+
+	return v, nil
+}
+
 // sortProjects puts Inbox first, then favorites, then the rest by order
 func sortProjects(projects []Project) []Project {
 	var inbox []Project

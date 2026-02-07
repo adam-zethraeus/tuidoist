@@ -781,6 +781,41 @@ func (v *TasksView) clampCursorSimple() {
 	}
 }
 
+// HandleMouse processes mouse events for the tasks view.
+func (v TasksView) HandleMouse(m tea.MouseEvent, yOffset int) (TasksView, tea.Cmd) {
+	if m.Action == tea.MouseActionMotion || m.Action == tea.MouseActionRelease {
+		return v, nil
+	}
+
+	// Scroll wheel
+	if m.Button == tea.MouseButtonWheelDown {
+		v.moveDown()
+		v.ensureVisible()
+		return v, nil
+	}
+	if m.Button == tea.MouseButtonWheelUp {
+		v.moveUp()
+		v.ensureVisible()
+		return v, nil
+	}
+
+	// Left click
+	if m.Button != tea.MouseButtonLeft {
+		return v, nil
+	}
+
+	localY := m.Y - yOffset  // subtract header row
+	itemOffset := localY - 2 // subtract title + padding rows
+	clickedIndex := v.scrollOffset + itemOffset
+
+	if clickedIndex >= 0 && clickedIndex < len(v.items) && !v.items[clickedIndex].isSection {
+		v.cursor = clickedIndex
+		v.ensureVisible()
+	}
+
+	return v, nil
+}
+
 func (v TasksView) selectedTask() *Task {
 	if v.cursor >= 0 && v.cursor < len(v.items) && !v.items[v.cursor].isSection {
 		return v.items[v.cursor].task
