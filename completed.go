@@ -235,14 +235,16 @@ func (v CompletedView) View(width, height int) string {
 			b.WriteString("\n")
 
 		case ciTask:
-			line := "    " + styledCheckbox(true, item.task.Priority) + "  " + taskCompletedStyle.Render(truncate(item.task.Content, width-20))
 			if selected {
+				// Plain text avoids inner ANSI resets breaking the selection background
+				line := "    ✓  " + truncate(item.task.Content, width-20)
 				b.WriteString(lipgloss.NewStyle().
 					Background(colorBgHL).
 					Foreground(colorBright).
 					Width(width - 4).
 					Render(line))
 			} else {
+				line := "    " + styledCheckbox(true, item.task.Priority) + "  " + taskCompletedStyle.Render(truncate(item.task.Content, width-20))
 				b.WriteString(line)
 			}
 			b.WriteString("\n")

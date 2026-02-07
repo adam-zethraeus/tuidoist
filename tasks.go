@@ -530,27 +530,58 @@ func (v TasksView) View() string {
 }
 
 func (v TasksView) renderTask(task *Task, selected bool, completed bool) string {
-	var parts []string
-
-	// Checkbox
-	parts = append(parts, styledCheckbox(completed, task.Priority))
-
-	// Content
 	maxContentWidth := v.width - 20
 	if maxContentWidth < 20 {
 		maxContentWidth = 20
 	}
+
+	if selected {
+		// Plain text avoids inner ANSI resets breaking the selection background
+		check := "○"
+		if completed {
+			check = "✓"
+		}
+		var parts []string
+		parts = append(parts, check, truncate(task.Content, maxContentWidth))
+		if task.Due != nil {
+			dueText := formatDue(task.Due)
+			if dueText != "" {
+				if task.Due.IsRecurring {
+					dueText += " ↻"
+				}
+				parts = append(parts, dueText)
+			}
+		}
+		if task.Priority > 0 && task.Priority < 4 {
+			parts = append(parts, priorityLabel(task.Priority))
+		}
+		if len(task.Labels) > 0 {
+			lbls := make([]string, len(task.Labels))
+			for i, l := range task.Labels {
+				lbls[i] = "@" + l
+			}
+			parts = append(parts, strings.Join(lbls, " "))
+		}
+		return lipgloss.NewStyle().
+			Background(colorBgHL).
+			Foreground(colorBright).
+			Bold(true).
+			Width(v.width).
+			Render("  " + strings.Join(parts, "  "))
+	}
+
+	// Non-selected: full styled rendering
+	var parts []string
+	parts = append(parts, styledCheckbox(completed, task.Priority))
+
 	content := truncate(task.Content, maxContentWidth)
 	if completed {
 		content = taskCompletedStyle.Render(content)
-	} else if selected {
-		content = lipgloss.NewStyle().Foreground(colorBright).Bold(true).Render(content)
 	} else {
 		content = taskContentStyle.Render(content)
 	}
 	parts = append(parts, content)
 
-	// Due date
 	if task.Due != nil {
 		dueText := formatDue(task.Due)
 		if dueText != "" {
@@ -568,13 +599,11 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 		}
 	}
 
-	// Priority (only show for p1-p3)
 	if task.Priority > 0 && task.Priority < 4 {
 		pl := priorityLabel(task.Priority)
 		parts = append(parts, priorityStyle(task.Priority).Render(pl))
 	}
 
-	// Labels
 	if len(task.Labels) > 0 {
 		lbls := make([]string, len(task.Labels))
 		for i, l := range task.Labels {
@@ -583,15 +612,7 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 		parts = append(parts, labelStyle.Render(strings.Join(lbls, " ")))
 	}
 
-	line := "  " + strings.Join(parts, "  ")
-
-	if selected {
-		return lipgloss.NewStyle().
-			Background(colorBgHL).
-			Width(v.width).
-			Render(line)
-	}
-	return line
+	return "  " + strings.Join(parts, "  ")
 }
 
 func (v TasksView) renderDialog() string {

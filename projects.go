@@ -227,27 +227,37 @@ func (v ProjectsView) View() string {
 	for i := start; i < end; i++ {
 		p := v.projects[i]
 		name := truncate(p.Name, v.width-6)
+		selected := i == v.cursor
 
-		// Color dot
-		dot := lipgloss.NewStyle().Foreground(projectColor(p.Color)).Render("●")
+		dotChar := "●"
 		if p.InboxProject {
-			dot = lipgloss.NewStyle().Foreground(colorBlue).Render("⌂")
+			dotChar = "⌂"
 		}
 
-		line := dot + " " + name
-		if p.IsFavorite {
-			line += " " + projectFavStyle.Render("★")
-		}
-
-		if i == v.cursor && v.focused {
-			b.WriteString(projectSelectedStyle.Width(v.width - 2).Render(line))
-		} else if i == v.cursor {
-			b.WriteString(lipgloss.NewStyle().
-				Foreground(colorBright).
-				Padding(0, 1).
-				Width(v.width - 2).
-				Render(line))
+		if selected {
+			// Plain text avoids inner ANSI resets breaking the selection background
+			line := dotChar + " " + name
+			if p.IsFavorite {
+				line += " ★"
+			}
+			if v.focused {
+				b.WriteString(projectSelectedStyle.Width(v.width - 2).Render(line))
+			} else {
+				b.WriteString(lipgloss.NewStyle().
+					Foreground(colorBright).
+					Padding(0, 1).
+					Width(v.width - 2).
+					Render(line))
+			}
 		} else {
+			dot := lipgloss.NewStyle().Foreground(projectColor(p.Color)).Render(dotChar)
+			if p.InboxProject {
+				dot = lipgloss.NewStyle().Foreground(colorBlue).Render(dotChar)
+			}
+			line := dot + " " + name
+			if p.IsFavorite {
+				line += " " + projectFavStyle.Render("★")
+			}
 			b.WriteString(projectNormalStyle.Width(v.width - 2).Render(line))
 		}
 		if i < end-1 {
