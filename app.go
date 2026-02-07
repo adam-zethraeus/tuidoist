@@ -286,8 +286,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.projects.SetFocused(true)
 			}
 		}
-		// Start background cache warming
-		if !a.bgRefreshStarted {
+		// Enqueue sync for stale projects. Always run after API refresh
+		// to catch newly discovered projects whose tasks/sections have
+		// never been synced (no sync_meta entry = stale).
+		if msg.err == nil {
 			a.bgRefreshStarted = true
 			cmds = append(cmds, a.repo.FindStaleProjects())
 		}

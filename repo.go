@@ -679,7 +679,7 @@ func (r *Repository) projectNameForID(projectID string) string {
 
 // --- Background cache warming ---
 
-// FindStaleProjects returns a list of project IDs whose task cache is past TTL.
+// FindStaleProjects returns a list of project IDs whose task or section cache is past TTL.
 func (r *Repository) FindStaleProjects() tea.Cmd {
 	return func() tea.Msg {
 		if r.store == nil {
@@ -691,7 +691,7 @@ func (r *Repository) FindStaleProjects() tea.Cmd {
 		}
 		var stale []string
 		for _, p := range projects {
-			if r.store.IsStale("tasks", p.ID) {
+			if r.store.IsStale("tasks", p.ID) || r.store.IsStale("sections", p.ID) {
 				stale = append(stale, p.ID)
 			}
 		}
@@ -706,13 +706,24 @@ func (r *Repository) FindStaleProjects() tea.Cmd {
 // It skips projects that have become fresh since queueing (e.g. user navigated there).
 func (r *Repository) BackgroundRefreshProject(projectID string, remaining []string) tea.Cmd {
 	return func() tea.Msg {
-		// Skip if user already loaded this project (it's fresh now)
-		if r.store != nil && !r.store.IsStale("tasks", projectID) {
+		if r.store == nil {
 			return backgroundRefreshDoneMsg{remaining: remaining}
 		}
-		// Warm cache — call API and update store, discard the returned msg structs
-		r.fetchTasksFromAPI(projectID)
-		r.fetchSectionsFromAPI(projectID)
+		taskStale := r.store.IsStale("tasks", projectID)
+		sectionStale := r.store.IsStale("sections", projectID)
+
+		// Skip if both are already fresh
+		if !taskStale && !sectionStale {
+			return backgroundRefreshDoneMsg{remaining: remaining}
+		}
+
+		// Refresh whichever is stale
+		if taskStale {
+			r.fetchTasksFromAPI(projectID)
+		}
+		if sectionStale {
+			r.fetchSectionsFromAPI(projectID)
+		}
 		return backgroundRefreshDoneMsg{remaining: remaining}
 	}
 }
