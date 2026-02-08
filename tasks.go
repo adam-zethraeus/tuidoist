@@ -609,22 +609,6 @@ func (v TasksView) View() string {
 		b.WriteString(v.renderDialog())
 	}
 
-	// Search bar
-	if v.searchMode {
-		b.WriteString("\n")
-		b.WriteString(searchInputStyle.Width(v.width - 4).Render("/ " + v.searchInput.View()))
-	} else if v.searchQuery != "" {
-		b.WriteString("\n")
-		matchInfo := ""
-		if len(v.matchIndices) > 0 {
-			matchInfo = fmt.Sprintf("  (%d/%d)", v.currentMatch+1, len(v.matchIndices))
-		} else {
-			matchInfo = "  (no matches)"
-		}
-		b.WriteString(searchInputStyle.Width(v.width - 4).Render(
-			footerKeyStyle.Render("/") + " " + v.searchQuery + matchInfo))
-	}
-
 	return b.String()
 }
 
@@ -773,7 +757,7 @@ func (v *TasksView) SetSize(width, height int) {
 	v.editInput.Width = width - 8
 	v.dueInput.Width = width - 8
 	v.quickInput.Width = width - 8
-	v.searchInput.Width = width - 12
+	v.searchInput.Width = 30
 }
 
 func (v *TasksView) SetFocused(focused bool) {
@@ -782,6 +766,25 @@ func (v *TasksView) SetFocused(focused bool) {
 
 func (v TasksView) handlesInput() bool {
 	return v.mode != "" || v.searchMode
+}
+
+// SearchPanel returns the floating search panel content, or "" if inactive.
+func (v TasksView) SearchPanel() string {
+	panelWidth := 40
+	if v.searchMode {
+		return searchPanelStyle.Width(panelWidth).Render("/ " + v.searchInput.View())
+	}
+	if v.searchQuery != "" {
+		matchInfo := ""
+		if len(v.matchIndices) > 0 {
+			matchInfo = fmt.Sprintf("  %d/%d", v.currentMatch+1, len(v.matchIndices))
+		} else {
+			matchInfo = "  (no matches)"
+		}
+		return searchPanelStyle.Width(panelWidth).Render(
+			footerKeyStyle.Render("/") + " " + v.searchQuery + matchInfo)
+	}
+	return ""
 }
 
 // rebuildItems creates the flat display list from sections and tasks

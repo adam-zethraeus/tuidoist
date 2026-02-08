@@ -249,7 +249,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.showQueue = true
 			a.queue.Refresh()
 			return a, nil
-		case "ctrl+p":
+		case "ctrl+p", "alt+p":
 			a.showSearch = true
 			a.search.Open()
 			return a, textinput.Blink
@@ -683,8 +683,34 @@ func (a App) View() string {
 
 	// Compose
 	view := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	view = padLines(view, a.width)
 
-	return padLines(view, a.width)
+	// Overlay floating search panel if local search is active
+	if panel := a.localSearchPanel(); panel != "" {
+		fgLines := strings.Split(panel, "\n")
+		panelW := 0
+		for _, l := range fgLines {
+			if w := lipgloss.Width(l); w > panelW {
+				panelW = w
+			}
+		}
+		panelH := len(fgLines)
+		x := a.width - panelW - 1
+		if x < sidebarWidth+2 {
+			x = sidebarWidth + 2
+		}
+		y := a.height - panelH - 2
+		view = placeOverlay(view, panel, x, y)
+	}
+
+	return view
+}
+
+func (a App) localSearchPanel() string {
+	if a.isTodayActive() {
+		return a.today.SearchPanel()
+	}
+	return a.tasks.SearchPanel()
 }
 
 func (a App) renderHeader() string {

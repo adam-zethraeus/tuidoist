@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -92,6 +93,70 @@ func prevMatchIndex(matches []int, cursor int) (int, int) {
 	return matches[len(matches)-1], len(matches) - 1 // wrap
 }
 
+// --- Overlay helpers ---
+
+// ansiTruncate truncates s to at most maxWidth visible characters,
+// preserving ANSI escape sequences.
+func ansiTruncate(s string, maxWidth int) string {
+	var buf strings.Builder
+	width := 0
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		if width >= maxWidth {
+			break
+		}
+		// ANSI escape sequence: ESC [
+		if runes[i] == '\x1b' && i+1 < len(runes) && runes[i+1] == '[' {
+			j := i + 2
+			for j < len(runes) && !((runes[j] >= 'A' && runes[j] <= 'Z') || (runes[j] >= 'a' && runes[j] <= 'z')) {
+				j++
+			}
+			if j < len(runes) {
+				j++ // include the terminator
+			}
+			buf.WriteString(string(runes[i:j]))
+			i = j
+			continue
+		}
+		buf.WriteRune(runes[i])
+		width++
+		i++
+	}
+	return buf.String()
+}
+
+// placeOverlay renders fg on top of bg at position (x, y).
+func placeOverlay(bg, fg string, x, y int) string {
+	bgLines := strings.Split(bg, "\n")
+	fgLines := strings.Split(fg, "\n")
+
+	for i, fgLine := range fgLines {
+		row := y + i
+		if row < 0 || row >= len(bgLines) {
+			continue
+		}
+		bgLine := bgLines[row]
+		bgW := lipgloss.Width(bgLine)
+
+		left := ansiTruncate(bgLine, x)
+		leftW := lipgloss.Width(left)
+		if leftW < x {
+			left += strings.Repeat(" ", x-leftW)
+		}
+
+		fgW := lipgloss.Width(fgLine)
+		right := ""
+		if x+fgW < bgW {
+			right = strings.Repeat(" ", bgW-x-fgW)
+		}
+
+		bgLines[row] = left + "\x1b[0m" + fgLine + "\x1b[0m" + right
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
 // --- Search result types ---
 
 type searchResultKind int
@@ -127,7 +192,7 @@ type SearchView struct {
 
 func NewSearchView(repo *Repository) SearchView {
 	ti := textinput.New()
-	ti.Placeholder = "Search tasks and projects..."
+	ti.Placeholder = "Search tasks and lists..."
 	ti.CharLimit = 200
 
 	return SearchView{
@@ -168,24 +233,25 @@ func (v *SearchView) filter() {
 		return
 	}
 
-	// Tasks first (max 15)
+	// Tasks (max 15): match on content or project name
 	taskCount := 0
 	for i := range v.allTasks {
 		if taskCount >= 15 {
 			break
 		}
 		t := &v.allTasks[i]
-		if containsMatch(t.Content, query) {
+		pName := v.projectMap[t.ProjectID]
+		if containsMatch(t.Content, query) || containsMatch(pName, query) {
 			v.results = append(v.results, searchResult{
 				kind:        searchResultTask,
 				task:        t,
-				projectName: v.projectMap[t.ProjectID],
+				projectName: pName,
 			})
 			taskCount++
 		}
 	}
 
-	// Projects (max 5)
+	// Lists (max 5)
 	projCount := 0
 	for i := range v.allProjects {
 		if projCount >= 5 {
@@ -278,7 +344,7 @@ func (v SearchView) View(width, height int) string {
 			Foreground(colorTextDim).
 			Italic(true).
 			Padding(0, 2).
-			Render("Type to search tasks and projects"))
+			Render("Type to search tasks and lists"))
 	} else if len(v.results) == 0 {
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().
@@ -288,7 +354,7 @@ func (v SearchView) View(width, height int) string {
 			Render("No matches"))
 	} else {
 		b.WriteString("\n")
-		maxVisible := height - 8
+		maxVisible := height - 11
 		if maxVisible < 1 {
 			maxVisible = 1
 		}
@@ -303,9 +369,27 @@ func (v SearchView) View(width, height int) string {
 			end = len(v.results)
 		}
 
+		// Track section headers
+		prevKind := searchResultKind(-1)
+
 		for i := start; i < end; i++ {
 			r := v.results[i]
 			selected := i == v.cursor
+
+			// Section headers on kind transitions
+			if r.kind != prevKind {
+				if prevKind >= 0 {
+					b.WriteString("\n")
+				}
+				switch r.kind {
+				case searchResultTask:
+					b.WriteString("  " + sectionStyle.Render("Tasks"))
+				case searchResultProject:
+					b.WriteString("  " + sectionStyle.Render("Lists"))
+				}
+				b.WriteString("\n")
+				prevKind = r.kind
+			}
 
 			var line string
 			switch r.kind {
@@ -368,10 +452,13 @@ func (v SearchView) View(width, height int) string {
 			}
 
 			b.WriteString(line)
-			if i < end-1 {
-				b.WriteString("\n")
-			}
+			b.WriteString("\n")
 		}
+
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(colorTextDim).
+			Padding(0, 2).
+			Render(fmt.Sprintf("%d results", len(v.results))))
 	}
 
 	// Footer

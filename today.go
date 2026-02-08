@@ -326,22 +326,6 @@ func (v TodayView) View() string {
 		}
 	}
 
-	// Search bar
-	if v.searchMode {
-		b.WriteString("\n")
-		b.WriteString(searchInputStyle.Width(v.width - 4).Render("/ " + v.searchInput.View()))
-	} else if v.searchQuery != "" {
-		b.WriteString("\n")
-		matchInfo := ""
-		if len(v.matchIndices) > 0 {
-			matchInfo = fmt.Sprintf("  (%d/%d)", v.currentMatch+1, len(v.matchIndices))
-		} else {
-			matchInfo = "  (no matches)"
-		}
-		b.WriteString(searchInputStyle.Width(v.width - 4).Render(
-			footerKeyStyle.Render("/") + " " + v.searchQuery + matchInfo))
-	}
-
 	return b.String()
 }
 
@@ -440,7 +424,7 @@ func (v TodayView) renderTask(task *Task, selected bool, faded bool) string {
 func (v *TodayView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
-	v.searchInput.Width = width - 12
+	v.searchInput.Width = 30
 }
 
 func (v *TodayView) SetFocused(focused bool) {
@@ -449,6 +433,25 @@ func (v *TodayView) SetFocused(focused bool) {
 
 func (v TodayView) handlesInput() bool {
 	return v.searchMode
+}
+
+// SearchPanel returns the floating search panel content, or "" if inactive.
+func (v TodayView) SearchPanel() string {
+	panelWidth := 40
+	if v.searchMode {
+		return searchPanelStyle.Width(panelWidth).Render("/ " + v.searchInput.View())
+	}
+	if v.searchQuery != "" {
+		matchInfo := ""
+		if len(v.matchIndices) > 0 {
+			matchInfo = fmt.Sprintf("  %d/%d", v.currentMatch+1, len(v.matchIndices))
+		} else {
+			matchInfo = "  (no matches)"
+		}
+		return searchPanelStyle.Width(panelWidth).Render(
+			footerKeyStyle.Render("/") + " " + v.searchQuery + matchInfo)
+	}
+	return ""
 }
 
 func (v TodayView) HandleMouse(m tea.MouseEvent, yOffset int) (TodayView, tea.Cmd) {

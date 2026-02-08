@@ -223,9 +223,11 @@ var (
 
 	// Search
 	searchMatchStyle = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
-	searchInputStyle = lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder(), true, false, false, false).
-				BorderForeground(colorBorderDim).Padding(0, 1)
+	searchPanelStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorBorderDim).
+				Background(colorBgOverlay).
+				Padding(0, 1)
 
 	// Today view
 	todayProjectTagStyle = lipgloss.NewStyle().Foreground(colorTextDim)
