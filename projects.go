@@ -8,7 +8,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ProjectsView is the sidebar project list
+// ProjectsView is the sidebar project list.
+// cursor=0 is the virtual "Today" entry; cursor>=1 maps to projects[cursor-1].
 type ProjectsView struct {
 	projects []Project
 	cursor   int
@@ -29,6 +30,7 @@ func NewProjectsView(repo *Repository) ProjectsView {
 
 	return ProjectsView{
 		repo:     repo,
+		cursor:   0, // default to Today
 		addInput: ai,
 	}
 }
@@ -37,18 +39,16 @@ func (v ProjectsView) Init() tea.Cmd {
 	return v.repo.FetchProjects()
 }
 
+// IsTodaySelected returns true when the virtual Today entry is selected.
+func (v ProjectsView) IsTodaySelected() bool {
+	return v.cursor == 0
+}
+
 func (v ProjectsView) Update(msg tea.Msg) (ProjectsView, tea.Cmd) {
 	switch msg := msg.(type) {
 	case cachedProjectsMsg:
 		v.projects = sortProjects(msg.projects)
-		if v.cursor == 0 {
-			for i, p := range v.projects {
-				if p.InboxProject {
-					v.cursor = i
-					break
-				}
-			}
-		}
+		// cursor stays at 0 (Today) on first load
 		return v, v.repo.RefreshProjects()
 
 	case projectsMsg:
@@ -57,16 +57,7 @@ func (v ProjectsView) Update(msg tea.Msg) (ProjectsView, tea.Cmd) {
 				return toastMsg{text: "Failed to load projects: " + msg.err.Error(), isError: true}
 			}
 		}
-		firstLoad := len(v.projects) == 0
 		v.projects = sortProjects(msg.projects)
-		if firstLoad {
-			for i, p := range v.projects {
-				if p.InboxProject {
-					v.cursor = i
-					break
-				}
-			}
-		}
 		return v, nil
 
 	case projectCreatedMsg:
@@ -93,8 +84,9 @@ func (v ProjectsView) Update(msg tea.Msg) (ProjectsView, tea.Cmd) {
 				break
 			}
 		}
-		if v.cursor >= len(v.projects) {
-			v.cursor = len(v.projects) - 1
+		// Clamp cursor (remember: max valid is len(projects) since 0=Today)
+		if v.cursor > len(v.projects) {
+			v.cursor = len(v.projects)
 		}
 		if v.cursor < 0 {
 			v.cursor = 0
@@ -160,10 +152,11 @@ func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
 		return v, nil
 	}
 
-	// Normal mode
+	// Normal mode — bounds: 0 (Today) to len(projects) inclusive
+	maxCursor := len(v.projects) // cursor=len(projects) maps to projects[len-1]
 	switch key {
 	case "j", "down":
-		if v.cursor < len(v.projects)-1 {
+		if v.cursor < maxCursor {
 			v.cursor++
 		}
 		return v, nil
@@ -176,9 +169,7 @@ func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
 		v.cursor = 0
 		return v, nil
 	case "G":
-		if len(v.projects) > 0 {
-			v.cursor = len(v.projects) - 1
-		}
+		v.cursor = maxCursor
 		return v, nil
 	case "a":
 		v.mode = "add"
@@ -186,6 +177,10 @@ func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
 		v.addInput.Focus()
 		return v, textinput.Blink
 	case "d":
+		// No-op for Today (cursor=0) or Inbox
+		if v.cursor == 0 {
+			return v, nil
+		}
 		p := v.SelectedProject()
 		if p != nil && !p.InboxProject {
 			v.mode = "archive"
@@ -209,56 +204,79 @@ func (v ProjectsView) View() string {
 	b.WriteString(sidebarTitleStyle.Render("Projects"))
 	b.WriteString("\n")
 
+	// Total items = 1 (Today) + len(projects)
+	totalItems := 1 + len(v.projects)
+
 	maxVisible := v.height - 3
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
 
-	// Scrolling window
+	// Scrolling window over the combined list
 	start := 0
 	if v.cursor >= maxVisible {
 		start = v.cursor - maxVisible + 1
 	}
 	end := start + maxVisible
-	if end > len(v.projects) {
-		end = len(v.projects)
+	if end > totalItems {
+		end = totalItems
 	}
 
 	for i := start; i < end; i++ {
-		p := v.projects[i]
-		name := truncate(p.Name, v.width-6)
 		selected := i == v.cursor
 
-		dotChar := "●"
-		if p.InboxProject {
-			dotChar = "⌂"
-		}
-
-		if selected {
-			// Plain text avoids inner ANSI resets breaking the selection background
-			line := dotChar + " " + name
-			if p.IsFavorite {
-				line += " ★"
-			}
-			if v.focused {
-				b.WriteString(projectSelectedStyle.Width(v.width - 2).Render(line))
+		if i == 0 {
+			// Virtual "Today" entry
+			line := "☀ Today"
+			if selected {
+				if v.focused {
+					b.WriteString(projectSelectedStyle.Width(v.width - 2).Render(line))
+				} else {
+					b.WriteString(lipgloss.NewStyle().
+						Foreground(colorBright).
+						Padding(0, 1).
+						Width(v.width - 2).
+						Render(line))
+				}
 			} else {
-				b.WriteString(lipgloss.NewStyle().
-					Foreground(colorBright).
-					Padding(0, 1).
-					Width(v.width - 2).
-					Render(line))
+				b.WriteString(projectNormalStyle.Width(v.width-2).Render(
+					lipgloss.NewStyle().Foreground(colorYellow).Render("☀")+" Today"))
 			}
 		} else {
-			dot := lipgloss.NewStyle().Foreground(projectColor(p.Color)).Render(dotChar)
+			// Real project at projects[i-1]
+			p := v.projects[i-1]
+			name := truncate(p.Name, v.width-6)
+
+			dotChar := "●"
 			if p.InboxProject {
-				dot = lipgloss.NewStyle().Foreground(colorBlue).Render(dotChar)
+				dotChar = "⌂"
 			}
-			line := dot + " " + name
-			if p.IsFavorite {
-				line += " " + projectFavStyle.Render("★")
+
+			if selected {
+				line := dotChar + " " + name
+				if p.IsFavorite {
+					line += " ★"
+				}
+				if v.focused {
+					b.WriteString(projectSelectedStyle.Width(v.width - 2).Render(line))
+				} else {
+					b.WriteString(lipgloss.NewStyle().
+						Foreground(colorBright).
+						Padding(0, 1).
+						Width(v.width - 2).
+						Render(line))
+				}
+			} else {
+				dot := lipgloss.NewStyle().Foreground(projectColor(p.Color)).Render(dotChar)
+				if p.InboxProject {
+					dot = lipgloss.NewStyle().Foreground(colorBlue).Render(dotChar)
+				}
+				line := dot + " " + name
+				if p.IsFavorite {
+					line += " " + projectFavStyle.Render("★")
+				}
+				b.WriteString(projectNormalStyle.Width(v.width - 2).Render(line))
 			}
-			b.WriteString(projectNormalStyle.Width(v.width - 2).Render(line))
 		}
 		if i < end-1 {
 			b.WriteString("\n")
@@ -295,13 +313,19 @@ func (v *ProjectsView) SetFocused(focused bool) {
 	v.focused = focused
 }
 
+// SelectedProject returns the currently selected project, or nil if Today is selected.
 func (v ProjectsView) SelectedProject() *Project {
-	if v.cursor >= 0 && v.cursor < len(v.projects) {
-		return &v.projects[v.cursor]
+	if v.cursor == 0 {
+		return nil // Today
+	}
+	idx := v.cursor - 1
+	if idx >= 0 && idx < len(v.projects) {
+		return &v.projects[idx]
 	}
 	return nil
 }
 
+// SelectedProjectID returns the ID of the selected project, or "" if Today is selected.
 func (v ProjectsView) SelectedProjectID() string {
 	if p := v.SelectedProject(); p != nil {
 		return p.ID
@@ -315,9 +339,12 @@ func (v ProjectsView) HandleMouse(m tea.MouseEvent, yOffset int) (ProjectsView, 
 		return v, nil
 	}
 
+	// Total items = 1 (Today) + len(projects)
+	totalItems := 1 + len(v.projects)
+
 	// Scroll wheel
 	if m.Button == tea.MouseButtonWheelDown {
-		if v.cursor < len(v.projects)-1 {
+		if v.cursor < totalItems-1 {
 			v.cursor++
 		}
 		return v, nil
@@ -347,8 +374,8 @@ func (v ProjectsView) HandleMouse(m tea.MouseEvent, yOffset int) (ProjectsView, 
 		start = v.cursor - maxVisible + 1
 	}
 	end := start + maxVisible
-	if end > len(v.projects) {
-		end = len(v.projects)
+	if end > totalItems {
+		end = totalItems
 	}
 
 	clickedIndex := start + itemOffset
@@ -357,6 +384,18 @@ func (v ProjectsView) HandleMouse(m tea.MouseEvent, yOffset int) (ProjectsView, 
 	}
 
 	return v, nil
+}
+
+// SelectProjectByID moves the cursor to the project with the given ID.
+// Returns true if found, false if not found.
+func (v *ProjectsView) SelectProjectByID(id string) bool {
+	for i, p := range v.projects {
+		if p.ID == id {
+			v.cursor = i + 1 // +1 because cursor=0 is Today
+			return true
+		}
+	}
+	return false
 }
 
 // sortProjects puts Inbox first, then favorites, then the rest by order

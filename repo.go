@@ -41,6 +41,37 @@ func (r *Repository) GetCachedSections(projectID string) []Section {
 	return sections
 }
 
+// GetCachedProjects returns all projects from cache synchronously.
+func (r *Repository) GetCachedProjects() []Project {
+	if r.store == nil {
+		return nil
+	}
+	projects, _ := r.store.GetProjects()
+	return projects
+}
+
+// GetAllCachedTasks returns all tasks from cache across all projects.
+func (r *Repository) GetAllCachedTasks() []Task {
+	if r.store == nil {
+		return nil
+	}
+	tasks, _ := r.store.GetAllTasks()
+	return tasks
+}
+
+// GetProjectNameMap returns a map of project ID to project name.
+func (r *Repository) GetProjectNameMap() map[string]string {
+	if r.store == nil {
+		return nil
+	}
+	projects, _ := r.store.GetProjects()
+	m := make(map[string]string, len(projects))
+	for _, p := range projects {
+		m[p.ID] = p.Name
+	}
+	return m
+}
+
 // --- Two-phase reads ---
 
 // FetchProjects returns cached projects instantly if available (stale or not),

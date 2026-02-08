@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -30,6 +31,7 @@ type App struct {
 	// Sub-views
 	projects  ProjectsView
 	tasks     TasksView
+	today     TodayView
 	queue     QueueView
 	completed CompletedView
 
@@ -50,6 +52,10 @@ type App struct {
 	// Completed overlay
 	showCompleted bool
 
+	// Search overlay
+	showSearch bool
+	search     SearchView
+
 	// Track last selected project to detect changes
 	lastProjectID string
 
@@ -67,8 +73,10 @@ func NewApp(repo *Repository) App {
 		focus:     focusSidebar,
 		projects:  NewProjectsView(repo),
 		tasks:     NewTasksView(repo),
+		today:     NewTodayView(repo),
 		queue:     NewQueueView(repo),
 		completed: NewCompletedView(repo),
+		search:    NewSearchView(repo),
 		loading:   true,
 		spinner:   s,
 	}
@@ -81,6 +89,8 @@ func (a App) Init() tea.Cmd {
 		a.repo.FlushNext(),
 	)
 }
+
+func (a App) isTodayActive() bool { return a.projects.IsTodaySelected() }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -106,8 +116,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Ignore mouse on help overlay (no interactable items)
-		if a.showHelp {
+		// Ignore mouse on help/search overlays
+		if a.showHelp || a.showSearch {
 			return a, nil
 		}
 
@@ -135,11 +145,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.focus = focusSidebar
 			a.projects.SetFocused(true)
 			a.tasks.SetFocused(false)
+			a.today.SetFocused(false)
 
+			prevToday := a.projects.IsTodaySelected()
 			prev := a.projects.SelectedProjectID()
 			a.projects, _ = a.projects.HandleMouse(m, 1)
 
-			// Auto-load project if cursor changed
+			// Switched to Today
+			if a.projects.IsTodaySelected() && !prevToday {
+				a.lastProjectID = ""
+				a.today.Refresh()
+				return a, nil
+			}
+			// Switched to a project
 			if p := a.projects.SelectedProject(); p != nil && p.ID != prev {
 				a.lastProjectID = p.ID
 				var taskCmd tea.Cmd
@@ -149,17 +167,34 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Tasks area
+		// Content area
 		a.focus = focusTasks
-		a.tasks.SetFocused(true)
 		a.projects.SetFocused(false)
-		a.tasks, _ = a.tasks.HandleMouse(m, 1)
+		if a.isTodayActive() {
+			a.today.SetFocused(true)
+			a.tasks.SetFocused(false)
+			a.today, _ = a.today.HandleMouse(m, 1)
+		} else {
+			a.tasks.SetFocused(true)
+			a.today.SetFocused(false)
+			a.tasks, _ = a.tasks.HandleMouse(m, 1)
+		}
 		return a, nil
 
 	case tea.KeyMsg:
 		// Always handle quit
 		if msg.String() == "ctrl+c" {
 			return a, tea.Quit
+		}
+
+		// Search overlay handles its own input
+		if a.showSearch {
+			var cmd tea.Cmd
+			a.search, cmd = a.search.Update(msg)
+			if !a.search.IsActive() {
+				a.showSearch = false
+			}
+			return a, cmd
 		}
 
 		// Queue overlay handles its own input
@@ -188,7 +223,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Don't handle global keys if a dialog is open
+		// Don't handle global keys if a dialog or search is open
+		if a.isTodayActive() && a.today.handlesInput() {
+			var cmd tea.Cmd
+			a.today, cmd = a.today.Update(msg)
+			return a, cmd
+		}
+
 		if a.tasks.handlesInput() {
 			var cmd tea.Cmd
 			a.tasks, cmd = a.tasks.Update(msg)
@@ -208,6 +249,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.showQueue = true
 			a.queue.Refresh()
 			return a, nil
+		case "ctrl+p":
+			a.showSearch = true
+			a.search.Open()
+			return a, textinput.Blink
 		case "?":
 			a.showHelp = !a.showHelp
 			return a, nil
@@ -223,11 +268,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.focus = focusSidebar
 			}
 			a.projects.SetFocused(a.focus == focusSidebar)
-			a.tasks.SetFocused(a.focus == focusTasks)
+			if a.isTodayActive() {
+				a.today.SetFocused(a.focus == focusTasks)
+				a.tasks.SetFocused(false)
+			} else {
+				a.tasks.SetFocused(a.focus == focusTasks)
+				a.today.SetFocused(false)
+			}
 			return a, nil
 		case "r":
 			// Refresh — force API fetch
 			a.loading = true
+			if a.isTodayActive() {
+				return a, a.repo.RefreshProjects()
+			}
 			return a, tea.Batch(
 				a.repo.RefreshProjects(),
 				a.repo.RefreshTasks(a.tasks.projectID),
@@ -238,7 +292,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Just switch focus — project already loaded on cursor move
 				a.focus = focusTasks
 				a.projects.SetFocused(false)
-				a.tasks.SetFocused(true)
+				if a.isTodayActive() {
+					a.today.SetFocused(true)
+					a.tasks.SetFocused(false)
+				} else {
+					a.tasks.SetFocused(true)
+					a.today.SetFocused(false)
+				}
 				return a, nil
 			}
 		}
@@ -249,10 +309,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
 
-		// Auto-load inbox tasks on first load
+		// On first load, cursor=0 means Today is selected
 		if a.lastProjectID == "" && len(msg.projects) > 0 {
-			p := a.projects.SelectedProject()
-			if p != nil {
+			if a.isTodayActive() {
+				a.today.Refresh()
+				a.today.SetFocused(false)
+				a.projects.SetFocused(true)
+			} else if p := a.projects.SelectedProject(); p != nil {
 				a.lastProjectID = p.ID
 				var taskCmd tea.Cmd
 				a.tasks, taskCmd = a.tasks.LoadProject(p.ID, p.Name)
@@ -274,10 +337,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
 
-		// Auto-load inbox tasks only on first load
+		// On first load or refresh, populate the active view
 		if msg.err == nil && len(msg.projects) > 0 && a.lastProjectID == "" {
-			p := a.projects.SelectedProject()
-			if p != nil {
+			if a.isTodayActive() {
+				a.today.Refresh()
+				a.today.SetFocused(false)
+				a.projects.SetFocused(true)
+			} else if p := a.projects.SelectedProject(); p != nil {
 				a.lastProjectID = p.ID
 				var taskCmd tea.Cmd
 				a.tasks, taskCmd = a.tasks.LoadProject(p.ID, p.Name)
@@ -285,6 +351,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.tasks.SetFocused(false)
 				a.projects.SetFocused(true)
 			}
+		}
+		// Refresh today if active (cache may have been updated by background refresh)
+		if msg.err == nil && a.isTodayActive() {
+			a.today.Refresh()
 		}
 		// Enqueue sync for stale projects. Always run after API refresh
 		// to catch newly discovered projects whose tasks/sections have
@@ -333,10 +403,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case taskReopenedMsg:
-		// Route to tasks view (adds back to active list if same project)
-		var cmd tea.Cmd
-		a.tasks, cmd = a.tasks.Update(msg)
-		cmds = append(cmds, cmd)
+		// Route to appropriate view
+		if a.isTodayActive() {
+			var cmd tea.Cmd
+			a.today, cmd = a.today.Update(msg)
+			cmds = append(cmds, cmd)
+		} else {
+			var cmd tea.Cmd
+			a.tasks, cmd = a.tasks.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		// Refresh completed view if open
 		if a.showCompleted {
 			a.completed.Refresh()
@@ -415,6 +491,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.remaining) > 0 {
 			return a, a.repo.BackgroundRefreshProject(msg.remaining[0], msg.remaining[1:])
 		}
+		// Background warming done — refresh Today if active
+		if a.isTodayActive() {
+			a.today.Refresh()
+		}
 		return a, nil
 
 	case toastMsg:
@@ -428,39 +508,113 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.toast = ""
 		return a, nil
 
+	case navigateToTaskMsg:
+		a.showSearch = false
+		// Navigate to the project containing the task
+		a.projects.SelectProjectByID(msg.projectID)
+		a.lastProjectID = msg.projectID
+		p := a.projects.SelectedProject()
+		projectName := ""
+		if p != nil {
+			projectName = p.Name
+		}
+		a.tasks.jumpToTaskID = msg.taskID
+		var taskCmd tea.Cmd
+		a.tasks, taskCmd = a.tasks.LoadProject(msg.projectID, projectName)
+		// Switch focus to tasks
+		a.focus = focusTasks
+		a.projects.SetFocused(false)
+		a.tasks.SetFocused(true)
+		a.today.SetFocused(false)
+		return a, taskCmd
+
+	case navigateToProjectMsg:
+		a.showSearch = false
+		if msg.projectID == "" {
+			// Navigate to Today
+			a.projects.cursor = 0
+			a.lastProjectID = ""
+			a.today.Refresh()
+			a.focus = focusTasks
+			a.projects.SetFocused(false)
+			a.today.SetFocused(true)
+			a.tasks.SetFocused(false)
+			return a, nil
+		}
+		a.projects.SelectProjectByID(msg.projectID)
+		a.lastProjectID = msg.projectID
+		p := a.projects.SelectedProject()
+		projectName := ""
+		if p != nil {
+			projectName = p.Name
+		}
+		var taskCmd tea.Cmd
+		a.tasks, taskCmd = a.tasks.LoadProject(msg.projectID, projectName)
+		a.focus = focusTasks
+		a.projects.SetFocused(false)
+		a.tasks.SetFocused(true)
+		a.today.SetFocused(false)
+		return a, taskCmd
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		a.spinner, cmd = a.spinner.Update(msg)
 		return a, cmd
 	}
 
+	// Route blink/tick messages to search overlay when active
+	if a.showSearch {
+		var cmd tea.Cmd
+		a.search, cmd = a.search.Update(msg)
+		return a, cmd
+	}
+
 	// Delegate to focused view
 	switch a.focus {
 	case focusSidebar:
+		prevToday := a.projects.IsTodaySelected()
 		prev := a.projects.SelectedProjectID()
 		var cmd tea.Cmd
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
-		// Auto-load project when sidebar cursor changes
-		if p := a.projects.SelectedProject(); p != nil && p.ID != prev {
+		// Switched to Today
+		if a.projects.IsTodaySelected() && !prevToday {
+			a.lastProjectID = ""
+			a.today.Refresh()
+		} else if p := a.projects.SelectedProject(); p != nil && p.ID != prev {
+			// Auto-load project when sidebar cursor changes
 			a.lastProjectID = p.ID
 			var taskCmd tea.Cmd
 			a.tasks, taskCmd = a.tasks.LoadProject(p.ID, p.Name)
 			cmds = append(cmds, taskCmd)
 		}
 	case focusTasks:
-		var cmd tea.Cmd
-		a.tasks, cmd = a.tasks.Update(msg)
-		cmds = append(cmds, cmd)
-	}
-
-	// Pass mutation results to tasks view even when sidebar is focused
-	switch msg.(type) {
-	case taskClosedMsg, taskDeletedMsg, taskCreatedMsg, taskUpdatedMsg, quickAddMsg:
-		if a.focus != focusTasks {
+		if a.isTodayActive() {
+			var cmd tea.Cmd
+			a.today, cmd = a.today.Update(msg)
+			cmds = append(cmds, cmd)
+		} else {
 			var cmd tea.Cmd
 			a.tasks, cmd = a.tasks.Update(msg)
 			cmds = append(cmds, cmd)
+		}
+	}
+
+	// Pass mutation results to the active content view even when sidebar is focused
+	switch msg.(type) {
+	case taskClosedMsg, taskDeletedMsg, taskCreatedMsg, taskUpdatedMsg, quickAddMsg:
+		if a.isTodayActive() {
+			if a.focus != focusTasks {
+				var cmd tea.Cmd
+				a.today, cmd = a.today.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		} else {
+			if a.focus != focusTasks {
+				var cmd tea.Cmd
+				a.tasks, cmd = a.tasks.Update(msg)
+				cmds = append(cmds, cmd)
+			}
 		}
 		// Trigger flush after optimistic mutations
 		cmds = append(cmds, a.repo.FlushNext())
@@ -488,6 +642,10 @@ func (a App) View() string {
 		return a.renderHelp()
 	}
 
+	if a.showSearch {
+		return a.search.View(a.width, a.height)
+	}
+
 	if a.showQueue {
 		return a.queue.View(a.width, a.height)
 	}
@@ -505,11 +663,18 @@ func (a App) View() string {
 		Height(a.height - 3).
 		Render(a.projects.View())
 
+	var contentView string
+	if a.isTodayActive() {
+		contentView = a.today.View()
+	} else {
+		contentView = a.tasks.View()
+	}
+
 	content := lipgloss.NewStyle().
 		Padding(0, 2).
 		Width(a.width - sidebarWidth - 1).
 		Height(a.height - 3).
-		Render(a.tasks.View())
+		Render(contentView)
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, content)
 
@@ -574,9 +739,14 @@ func (a App) renderHeader() string {
 func (a App) renderFooter() string {
 	var hints []string
 
-	if a.tasks.handlesInput() {
+	if a.tasks.handlesInput() && !a.tasks.searchMode {
 		hints = append(hints,
 			keyHint("enter", "confirm"),
+			keyHint("esc", "cancel"),
+		)
+	} else if a.tasks.searchMode || (a.isTodayActive() && a.today.searchMode) {
+		hints = append(hints,
+			keyHint("enter", "search"),
 			keyHint("esc", "cancel"),
 		)
 	} else if a.focus == focusSidebar {
@@ -598,11 +768,29 @@ func (a App) renderFooter() string {
 				keyHint("enter/tab", "tasks"),
 				keyHint("a", "add list"),
 				keyHint("d", "archive"),
+				keyHint("^P", "search"),
 				keyHint("C", "completed"),
 				keyHint("?", "help"),
 				keyHint("q", "quit"),
 			)
 		}
+	} else if a.isTodayActive() {
+		hints = append(hints,
+			keyHint("j/k", "nav"),
+			keyHint("x/space", "toggle"),
+			keyHint("/", "search"),
+		)
+		if a.today.searchQuery != "" {
+			hints = append(hints, keyHint("n/N", "next/prev"))
+		}
+		hints = append(hints,
+			keyHint("tab", "projects"),
+			keyHint("^P", "search all"),
+			keyHint("C", "completed"),
+			keyHint("Q", "queue"),
+			keyHint("?", "help"),
+			keyHint("q", "quit"),
+		)
 	} else {
 		hints = append(hints,
 			keyHint("j/k", "nav"),
@@ -613,6 +801,13 @@ func (a App) renderFooter() string {
 			keyHint("s", "due"),
 			keyHint("d", "del"),
 			keyHint("1-4", "prio"),
+			keyHint("/", "search"),
+		)
+		if a.tasks.searchQuery != "" {
+			hints = append(hints, keyHint("n/N", "next/prev"))
+		}
+		hints = append(hints,
+			keyHint("^P", "search all"),
 			keyHint("C", "completed"),
 			keyHint("Q", "queue"),
 			keyHint("tab", "projects"),
@@ -648,6 +843,12 @@ func (a App) renderHelp() string {
 		{"Projects", ""},
 		{"a", "Add new list"},
 		{"d", "Archive list"},
+		{"", ""},
+		{"Search", ""},
+		{"ctrl+p", "Global search (tasks + projects)"},
+		{"/", "Search in current view"},
+		{"n / N", "Next / previous match"},
+		{"esc", "Clear search"},
 		{"", ""},
 		{"General", ""},
 		{"r", "Refresh"},
@@ -694,7 +895,16 @@ func (a App) renderHelp() string {
 
 func (a *App) updateSizes() {
 	a.projects.SetSize(sidebarWidth-2, a.height-3)
-	a.tasks.SetSize(a.width-sidebarWidth-5, a.height-4)
+	contentW := a.width - sidebarWidth - 5
+	contentH := a.height - 4
+	a.tasks.SetSize(contentW, contentH)
+	a.today.SetSize(contentW, contentH)
 	a.projects.SetFocused(a.focus == focusSidebar)
-	a.tasks.SetFocused(a.focus == focusTasks)
+	if a.isTodayActive() {
+		a.today.SetFocused(a.focus == focusTasks)
+		a.tasks.SetFocused(false)
+	} else {
+		a.tasks.SetFocused(a.focus == focusTasks)
+		a.today.SetFocused(false)
+	}
 }

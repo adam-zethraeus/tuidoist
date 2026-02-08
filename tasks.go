@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -46,6 +47,16 @@ type TasksView struct {
 
 	// Completed tasks (in-memory, cleared on project switch)
 	completedTasks []Task
+
+	// Page-local search
+	searchMode   bool
+	searchInput  textinput.Model
+	searchQuery  string
+	matchIndices []int
+	currentMatch int
+
+	// Jump target (set by global search navigation)
+	jumpToTaskID string
 }
 
 func NewTasksView(repo *Repository) TasksView {
@@ -65,12 +76,17 @@ func NewTasksView(repo *Repository) TasksView {
 	qi.Placeholder = "Buy milk tomorrow #Work @urgent p1"
 	qi.CharLimit = 500
 
+	si := textinput.New()
+	si.Placeholder = "Search..."
+	si.CharLimit = 200
+
 	return TasksView{
-		repo:       repo,
-		addInput:   ai,
-		editInput:  ei,
-		dueInput:   di,
-		quickInput: qi,
+		repo:        repo,
+		addInput:    ai,
+		editInput:   ei,
+		dueInput:    di,
+		quickInput:  qi,
+		searchInput: si,
 	}
 }
 
@@ -84,6 +100,10 @@ func (v TasksView) LoadProject(projectID, projectName string) (TasksView, tea.Cm
 	v.cursor = 0
 	v.scrollOffset = 0
 	v.completedTasks = nil
+	v.searchMode = false
+	v.searchQuery = ""
+	v.matchIndices = nil
+	v.currentMatch = 0
 
 	// Sync-load cache for instant display
 	v.tasks = v.repo.GetCachedTasks(projectID)
@@ -272,12 +292,42 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 		v.quickInput, cmd = v.quickInput.Update(msg)
 		return v, cmd
 	}
+	if v.searchMode {
+		var cmd tea.Cmd
+		v.searchInput, cmd = v.searchInput.Update(msg)
+		return v, cmd
+	}
 
 	return v, nil
 }
 
 func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 	key := msg.String()
+
+	// Search mode
+	if v.searchMode {
+		switch key {
+		case "enter":
+			v.searchMode = false
+			v.searchQuery = strings.TrimSpace(v.searchInput.Value())
+			v.matchIndices = findMatchIndices(v.items, v.searchQuery)
+			if len(v.matchIndices) > 0 {
+				v.cursor = v.matchIndices[0]
+				v.currentMatch = 0
+				v.ensureVisible()
+			}
+			return v, nil
+		case "esc":
+			v.searchMode = false
+			return v, nil
+		}
+		var cmd tea.Cmd
+		v.searchInput, cmd = v.searchInput.Update(msg)
+		// Live filter as user types
+		q := strings.TrimSpace(v.searchInput.Value())
+		v.matchIndices = findMatchIndices(v.items, q)
+		return v, cmd
+	}
 
 	// Dialog mode key handling
 	switch v.mode {
@@ -385,6 +435,39 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 
 	// Normal mode
 	switch key {
+	case "/":
+		v.searchMode = true
+		v.searchInput.Reset()
+		v.searchInput.Focus()
+		return v, textinput.Blink
+	case "n":
+		if v.searchQuery != "" && len(v.matchIndices) > 0 {
+			idx, num := nextMatchIndex(v.matchIndices, v.cursor)
+			if idx >= 0 {
+				v.cursor = idx
+				v.currentMatch = num
+				v.ensureVisible()
+			}
+		}
+		return v, nil
+	case "N":
+		if v.searchQuery != "" && len(v.matchIndices) > 0 {
+			idx, num := prevMatchIndex(v.matchIndices, v.cursor)
+			if idx >= 0 {
+				v.cursor = idx
+				v.currentMatch = num
+				v.ensureVisible()
+			}
+		}
+		return v, nil
+	case "esc":
+		if v.searchQuery != "" {
+			v.searchQuery = ""
+			v.matchIndices = nil
+			v.currentMatch = 0
+			return v, nil
+		}
+		return v, nil
 	case "j", "down":
 		v.moveDown()
 		v.ensureVisible()
@@ -526,6 +609,22 @@ func (v TasksView) View() string {
 		b.WriteString(v.renderDialog())
 	}
 
+	// Search bar
+	if v.searchMode {
+		b.WriteString("\n")
+		b.WriteString(searchInputStyle.Width(v.width - 4).Render("/ " + v.searchInput.View()))
+	} else if v.searchQuery != "" {
+		b.WriteString("\n")
+		matchInfo := ""
+		if len(v.matchIndices) > 0 {
+			matchInfo = fmt.Sprintf("  (%d/%d)", v.currentMatch+1, len(v.matchIndices))
+		} else {
+			matchInfo = "  (no matches)"
+		}
+		b.WriteString(searchInputStyle.Width(v.width - 4).Render(
+			footerKeyStyle.Render("/") + " " + v.searchQuery + matchInfo))
+	}
+
 	return b.String()
 }
 
@@ -541,8 +640,12 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 		if completed {
 			check = "✓"
 		}
+		content := truncate(task.Content, maxContentWidth)
+		if v.searchQuery != "" {
+			content = highlightMatchPlain(content, v.searchQuery)
+		}
 		var parts []string
-		parts = append(parts, check, truncate(task.Content, maxContentWidth))
+		parts = append(parts, check, content)
 		if task.Due != nil {
 			dueText := formatDue(task.Due)
 			if dueText != "" {
@@ -576,9 +679,17 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 
 	content := truncate(task.Content, maxContentWidth)
 	if completed {
-		content = taskCompletedStyle.Render(content)
+		if v.searchQuery != "" {
+			content = highlightMatch(content, v.searchQuery, taskCompletedStyle, searchMatchStyle)
+		} else {
+			content = taskCompletedStyle.Render(content)
+		}
 	} else {
-		content = taskContentStyle.Render(content)
+		if v.searchQuery != "" {
+			content = highlightMatch(content, v.searchQuery, taskContentStyle, searchMatchStyle)
+		} else {
+			content = taskContentStyle.Render(content)
+		}
 	}
 	parts = append(parts, content)
 
@@ -662,6 +773,7 @@ func (v *TasksView) SetSize(width, height int) {
 	v.editInput.Width = width - 8
 	v.dueInput.Width = width - 8
 	v.quickInput.Width = width - 8
+	v.searchInput.Width = width - 12
 }
 
 func (v *TasksView) SetFocused(focused bool) {
@@ -669,7 +781,7 @@ func (v *TasksView) SetFocused(focused bool) {
 }
 
 func (v TasksView) handlesInput() bool {
-	return v.mode != ""
+	return v.mode != "" || v.searchMode
 }
 
 // rebuildItems creates the flat display list from sections and tasks
@@ -714,6 +826,18 @@ func (v *TasksView) rebuildItems() {
 		for i := range v.completedTasks {
 			v.items = append(v.items, displayItem{task: &v.completedTasks[i], completed: true})
 		}
+	}
+
+	// Jump to task if requested (from global search navigation)
+	if v.jumpToTaskID != "" {
+		for i, item := range v.items {
+			if item.task != nil && item.task.ID == v.jumpToTaskID {
+				v.cursor = i
+				v.ensureVisible()
+				break
+			}
+		}
+		v.jumpToTaskID = ""
 	}
 }
 

@@ -251,6 +251,29 @@ func (s *Store) DeleteTask(taskID string) error {
 	return err
 }
 
+// GetAllTasks returns all cached tasks across all projects.
+func (s *Store) GetAllTasks() ([]Task, error) {
+	rows, err := s.db.Query("SELECT data FROM tasks")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var blob string
+		if err := rows.Scan(&blob); err != nil {
+			return nil, err
+		}
+		var t Task
+		if err := json.Unmarshal([]byte(blob), &t); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 // --- Sections ---
 
 // GetSections returns cached sections for a project.

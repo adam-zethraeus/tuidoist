@@ -250,6 +250,15 @@ type toastMsg struct {
 
 type clearToastMsg struct{}
 
+type navigateToTaskMsg struct {
+	projectID string
+	taskID    string
+}
+
+type navigateToProjectMsg struct {
+	projectID string
+}
+
 type tickMsg struct{}
 
 // --- Helper functions ---

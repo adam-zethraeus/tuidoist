@@ -220,6 +220,16 @@ var (
 				Background(colorBgHL).
 				Foreground(colorBright).
 				Bold(true)
+
+	// Search
+	searchMatchStyle = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
+	searchInputStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder(), true, false, false, false).
+				BorderForeground(colorBorderDim).Padding(0, 1)
+
+	// Today view
+	todayProjectTagStyle = lipgloss.NewStyle().Foreground(colorTextDim)
+	todayUpNextStyle     = lipgloss.NewStyle().Foreground(colorTextDim)
 )
 
 // keyHint renders a styled key shortcut for footer
