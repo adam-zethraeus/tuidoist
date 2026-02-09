@@ -276,6 +276,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.today.SetFocused(false)
 			}
 			return a, nil
+		case "n":
+			// If a view has active search results, let n/N navigate matches instead
+			if a.isTodayActive() && a.today.searchQuery != "" {
+				break // fall through to view delegation
+			}
+			if !a.isTodayActive() && a.tasks.searchQuery != "" {
+				break // fall through to view delegation
+			}
+			// Quick add — open dialog on the tasks view
+			a.tasks.mode = "quick-add"
+			a.tasks.quickInput.Reset()
+			a.tasks.quickInput.Focus()
+			return a, textinput.Blink
 		case "r":
 			// Refresh — force API fetch
 			a.loading = true
@@ -792,6 +805,7 @@ func (a App) renderFooter() string {
 			hints = append(hints,
 				keyHint("j/k", "nav"),
 				keyHint("enter/tab", "tasks"),
+				keyHint("n", "new task"),
 				keyHint("a", "add list"),
 				keyHint("d", "archive"),
 				keyHint("^P", "search"),
@@ -804,6 +818,7 @@ func (a App) renderFooter() string {
 		hints = append(hints,
 			keyHint("j/k", "nav"),
 			keyHint("x/space", "toggle"),
+			keyHint("n", "new"),
 			keyHint("/", "search"),
 		)
 		if a.today.searchQuery != "" {
@@ -821,8 +836,7 @@ func (a App) renderFooter() string {
 		hints = append(hints,
 			keyHint("j/k", "nav"),
 			keyHint("x/space", "toggle"),
-			keyHint("a", "add"),
-			keyHint("A", "quick"),
+			keyHint("n", "new"),
 			keyHint("e", "edit"),
 			keyHint("s", "due"),
 			keyHint("d", "del"),
@@ -859,8 +873,7 @@ func (a App) renderHelp() string {
 		{"", ""},
 		{"Tasks", ""},
 		{"x / space", "Toggle done (complete/reopen)"},
-		{"a", "Add new task"},
-		{"A", "Quick add (natural language)"},
+		{"n", "New task (quick add)"},
 		{"e", "Edit task content"},
 		{"s", "Set due date"},
 		{"d", "Delete task"},
@@ -872,6 +885,7 @@ func (a App) renderHelp() string {
 		{"", ""},
 		{"Search", ""},
 		{"ctrl+p", "Global search (tasks + projects)"},
+		{"alt+enter", "Create task from search text"},
 		{"/", "Search in current view"},
 		{"n / N", "Next / previous match"},
 		{"esc", "Clear search"},

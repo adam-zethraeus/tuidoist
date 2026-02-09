@@ -275,9 +275,23 @@ func (v SearchView) Update(msg tea.Msg) (SearchView, tea.Cmd) {
 		case "esc":
 			v.Close()
 			return v, nil
-		case "enter":
-			if len(v.results) == 0 {
+		case "alt+enter":
+			// Create a new task via quick-add with the search text
+			text := strings.TrimSpace(v.input.Value())
+			if text == "" {
 				return v, nil
+			}
+			v.Close()
+			return v, v.repo.QuickAdd(text)
+		case "enter":
+			// If no results, create a new task via quick-add
+			if len(v.results) == 0 {
+				text := strings.TrimSpace(v.input.Value())
+				if text == "" {
+					return v, nil
+				}
+				v.Close()
+				return v, v.repo.QuickAdd(text)
 			}
 			r := v.results[v.cursor]
 			v.Close()
@@ -464,7 +478,12 @@ func (v SearchView) View(width, height int) string {
 	// Footer
 	b.WriteString("\n\n")
 	b.WriteString(footerKeyStyle.Render("↑/↓") + " " + footerDescStyle.Render("navigate") + "  ")
-	b.WriteString(footerKeyStyle.Render("enter") + " " + footerDescStyle.Render("go to") + "  ")
+	if len(v.results) > 0 {
+		b.WriteString(footerKeyStyle.Render("enter") + " " + footerDescStyle.Render("go to") + "  ")
+		b.WriteString(footerKeyStyle.Render("alt+enter") + " " + footerDescStyle.Render("new task") + "  ")
+	} else if query != "" {
+		b.WriteString(footerKeyStyle.Render("enter") + " " + footerDescStyle.Render("new task") + "  ")
+	}
 	b.WriteString(footerKeyStyle.Render("esc") + " " + footerDescStyle.Render("close"))
 
 	return helpStyle.

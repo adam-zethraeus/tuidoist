@@ -33,9 +33,8 @@ type TasksView struct {
 	projectName string
 
 	// Dialog state
-	mode       string // "", "add", "quick-add", "edit", "delete", "due"
-	addInput   textinput.Model
-	editInput  textinput.Model
+	mode      string // "", "quick-add", "edit", "delete", "due"
+	editInput textinput.Model
 	dueInput   textinput.Model
 	quickInput textinput.Model
 
@@ -60,10 +59,6 @@ type TasksView struct {
 }
 
 func NewTasksView(repo *Repository) TasksView {
-	ai := textinput.New()
-	ai.Placeholder = "Task name..."
-	ai.CharLimit = 500
-
 	ei := textinput.New()
 	ei.Placeholder = "Edit task..."
 	ei.CharLimit = 500
@@ -82,7 +77,6 @@ func NewTasksView(repo *Repository) TasksView {
 
 	return TasksView{
 		repo:        repo,
-		addInput:    ai,
 		editInput:   ei,
 		dueInput:    di,
 		quickInput:  qi,
@@ -272,11 +266,6 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 	}
 
 	// Update text inputs if in a dialog mode
-	if v.mode == "add" {
-		var cmd tea.Cmd
-		v.addInput, cmd = v.addInput.Update(msg)
-		return v, cmd
-	}
 	if v.mode == "edit" {
 		var cmd tea.Cmd
 		v.editInput, cmd = v.editInput.Update(msg)
@@ -331,27 +320,6 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 
 	// Dialog mode key handling
 	switch v.mode {
-	case "add":
-		switch key {
-		case "enter":
-			content := strings.TrimSpace(v.addInput.Value())
-			if content == "" {
-				v.mode = ""
-				return v, nil
-			}
-			v.mode = ""
-			return v, v.repo.CreateTask(createTaskRequest{
-				Content:   content,
-				ProjectID: v.projectID,
-			})
-		case "esc":
-			v.mode = ""
-			return v, nil
-		}
-		var cmd tea.Cmd
-		v.addInput, cmd = v.addInput.Update(msg)
-		return v, cmd
-
 	case "quick-add":
 		switch key {
 		case "enter":
@@ -496,16 +464,6 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 			}
 			return v, v.repo.CloseTask(item.task.ID)
 		}
-	case "a":
-		v.mode = "add"
-		v.addInput.Reset()
-		v.addInput.Focus()
-		return v, textinput.Blink
-	case "A":
-		v.mode = "quick-add"
-		v.quickInput.Reset()
-		v.quickInput.Focus()
-		return v, textinput.Blink
 	case "e":
 		task := v.selectedTask()
 		if task != nil {
@@ -555,7 +513,7 @@ func (v TasksView) View() string {
 			emptyStyle.Render("Loading tasks...")
 	}
 	if len(v.items) == 0 && len(v.tasks) == 0 {
-		content := emptyStyle.Render("No tasks - press 'a' to add one")
+		content := emptyStyle.Render("No tasks - press 'n' to add one")
 		if v.mode != "" {
 			content += "\n" + v.renderDialog()
 		}
@@ -712,11 +670,6 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 
 func (v TasksView) renderDialog() string {
 	switch v.mode {
-	case "add":
-		return dialogStyle.Width(v.width - 4).Render(
-			dialogTitleStyle.Render("Add Task") + "\n" +
-				v.addInput.View(),
-		)
 	case "quick-add":
 		return dialogStyle.Width(v.width - 4).Render(
 			dialogTitleStyle.Render("Quick Add") + "\n" +
@@ -753,7 +706,6 @@ func (v TasksView) renderDialog() string {
 func (v *TasksView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
-	v.addInput.Width = width - 8
 	v.editInput.Width = width - 8
 	v.dueInput.Width = width - 8
 	v.quickInput.Width = width - 8
