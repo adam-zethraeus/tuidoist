@@ -37,6 +37,7 @@ type TasksView struct {
 	editInput textinput.Model
 	dueInput   textinput.Model
 	quickInput textinput.Model
+	quickAddProject string // project name to default to for quick-add (empty = Inbox)
 
 	// Scroll offset
 	scrollOffset int
@@ -328,6 +329,10 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 				v.mode = ""
 				return v, nil
 			}
+			// Default to current project if the user didn't specify one
+			if v.quickAddProject != "" && !strings.Contains(text, "#") {
+				text += " #" + v.quickAddProject
+			}
 			v.mode = ""
 			return v, v.repo.QuickAdd(text)
 		case "esc":
@@ -514,7 +519,7 @@ func (v TasksView) View() string {
 	}
 	if len(v.items) == 0 && len(v.tasks) == 0 {
 		content := emptyStyle.Render("No tasks - press 'n' to add one")
-		if v.mode != "" {
+		if v.mode != "" && v.mode != "quick-add" {
 			content += "\n" + v.renderDialog()
 		}
 		return content
@@ -561,8 +566,8 @@ func (v TasksView) View() string {
 		}
 	}
 
-	// Render dialog overlay if active
-	if v.mode != "" {
+	// Render dialog overlay if active (quick-add is rendered as app-level overlay)
+	if v.mode != "" && v.mode != "quick-add" {
 		b.WriteString("\n\n")
 		b.WriteString(v.renderDialog())
 	}

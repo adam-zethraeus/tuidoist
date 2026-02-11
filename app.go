@@ -288,6 +288,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.tasks.mode = "quick-add"
 			a.tasks.quickInput.Reset()
 			a.tasks.quickInput.Focus()
+			// Clear project context on Today so quick-add doesn't default to a stale project
+			if a.isTodayActive() {
+				a.tasks.quickAddProject = ""
+			} else {
+				a.tasks.quickAddProject = a.tasks.projectName
+			}
 			return a, textinput.Blink
 		case "r":
 			// Refresh — force API fetch
@@ -697,6 +703,30 @@ func (a App) View() string {
 	// Compose
 	view := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 	view = padLines(view, a.width)
+
+	// Overlay floating quick-add dialog
+	if a.tasks.mode == "quick-add" {
+		contentW := a.width - sidebarWidth - 5
+		if contentW < 40 {
+			contentW = 40
+		}
+		panel := dialogStyle.Width(contentW - 4).Render(
+			dialogTitleStyle.Render("Quick Add") + "\n" +
+				inputLabelStyle.Render("Supports: dates, #project, @label, p1-p4, //description") + "\n" +
+				a.tasks.quickInput.View(),
+		)
+		fgLines := strings.Split(panel, "\n")
+		panelW := 0
+		for _, l := range fgLines {
+			if w := lipgloss.Width(l); w > panelW {
+				panelW = w
+			}
+		}
+		panelH := len(fgLines)
+		x := sidebarWidth + (a.width-sidebarWidth-panelW)/2
+		y := (a.height - panelH) / 2
+		view = placeOverlay(view, panel, x, y)
+	}
 
 	// Overlay floating search panel if local search is active
 	if panel := a.localSearchPanel(); panel != "" {
