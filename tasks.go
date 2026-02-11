@@ -259,7 +259,7 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 		)
 
 	case tea.KeyMsg:
-		if !v.focused {
+		if !v.focused && v.mode == "" && !v.searchMode {
 			return v, nil
 		}
 		return v.handleKey(msg)
