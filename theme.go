@@ -122,6 +122,12 @@ var (
 	labelStyle = lipgloss.NewStyle().
 			Foreground(colorCyan)
 
+	assigneeStyle = lipgloss.NewStyle().
+			Foreground(colorBlue)
+
+	deadlineStyle = lipgloss.NewStyle().
+			Foreground(colorOrange)
+
 	// Section headers
 	sectionStyle = lipgloss.NewStyle().
 			Foreground(colorSubtext).
@@ -293,4 +299,3 @@ func padLines(s string, width int) string {
 	}
 	return strings.Join(lines, "\n")
 }
-

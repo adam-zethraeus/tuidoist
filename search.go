@@ -93,6 +93,28 @@ func prevMatchIndex(matches []int, cursor int) (int, int) {
 	return matches[len(matches)-1], len(matches) - 1 // wrap
 }
 
+func mutationBadgePlain(status MutationStatus) string {
+	switch status {
+	case MutationPending, MutationFlushing:
+		return "[sync]"
+	case MutationConflicted:
+		return "[conflict]"
+	default:
+		return ""
+	}
+}
+
+func mutationBadgeStyled(status MutationStatus) string {
+	switch status {
+	case MutationPending, MutationFlushing:
+		return lipgloss.NewStyle().Foreground(colorBlue).Render("sync")
+	case MutationConflicted:
+		return lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("conflict")
+	default:
+		return ""
+	}
+}
+
 // --- Overlay helpers ---
 
 // ansiTruncate truncates s to at most maxWidth visible characters,
@@ -176,13 +198,13 @@ type searchResult struct {
 // --- SearchView ---
 
 type SearchView struct {
-	input    textinput.Model
-	results  []searchResult
-	cursor   int
-	repo     *Repository
-	width    int
-	height   int
-	active   bool
+	input   textinput.Model
+	results []searchResult
+	cursor  int
+	repo    *Repository
+	width   int
+	height  int
+	active  bool
 
 	// Cached data for filtering
 	allTasks    []Task
@@ -271,19 +293,19 @@ func (v *SearchView) filter() {
 func (v SearchView) Update(msg tea.Msg) (SearchView, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc":
+		switch ResolveAction(ContextSearchOverlay, msg.String()) {
+		case ActionCancel:
 			v.Close()
 			return v, nil
-		case "alt+enter":
+		case ActionSearchCreate:
 			// Create a new task via quick-add with the search text
 			text := strings.TrimSpace(v.input.Value())
 			if text == "" {
 				return v, nil
 			}
 			v.Close()
-			return v, v.repo.QuickAdd(text)
-		case "enter":
+			return v, v.repo.QuickAdd(text, "")
+		case ActionConfirm:
 			// If no results, create a new task via quick-add
 			if len(v.results) == 0 {
 				text := strings.TrimSpace(v.input.Value())
@@ -291,7 +313,7 @@ func (v SearchView) Update(msg tea.Msg) (SearchView, tea.Cmd) {
 					return v, nil
 				}
 				v.Close()
-				return v, v.repo.QuickAdd(text)
+				return v, v.repo.QuickAdd(text, "")
 			}
 			r := v.results[v.cursor]
 			v.Close()
@@ -309,12 +331,12 @@ func (v SearchView) Update(msg tea.Msg) (SearchView, tea.Cmd) {
 				}
 			}
 			return v, nil
-		case "up", "ctrl+p":
+		case ActionNavUp:
 			if v.cursor > 0 {
 				v.cursor--
 			}
 			return v, nil
-		case "down", "ctrl+n":
+		case ActionNavDown:
 			if v.cursor < len(v.results)-1 {
 				v.cursor++
 			}
@@ -385,6 +407,7 @@ func (v SearchView) View(width, height int) string {
 
 		// Track section headers
 		prevKind := searchResultKind(-1)
+		assigneeNames := v.repo.GetAssigneeNameMap()
 
 		for i := start; i < end; i++ {
 			r := v.results[i]
@@ -421,6 +444,12 @@ func (v SearchView) View(width, height int) string {
 							line += "  " + due
 						}
 					}
+					if deadline := formatDeadline(r.task.Deadline); deadline != "" {
+						line += "  " + deadline
+					}
+					if assignee := formatAssignee(r.task, assigneeNames); assignee != "" {
+						line += "  " + assignee
+					}
 					line = lipgloss.NewStyle().
 						Background(colorBgHL).
 						Foreground(colorBright).
@@ -444,6 +473,18 @@ func (v SearchView) View(width, height int) string {
 								line += "  " + dueUpcomingStyle.Render(due)
 							}
 						}
+					}
+					if deadline := formatDeadline(r.task.Deadline); deadline != "" {
+						if isDeadlineOverdue(r.task.Deadline) {
+							line += "  " + dueOverdueStyle.Render(deadline)
+						} else if isDeadlineToday(r.task.Deadline) {
+							line += "  " + dueTodayStyle.Render(deadline)
+						} else {
+							line += "  " + deadlineStyle.Render(deadline)
+						}
+					}
+					if assignee := formatAssignee(r.task, assigneeNames); assignee != "" {
+						line += "  " + assigneeStyle.Render(assignee)
 					}
 				}
 

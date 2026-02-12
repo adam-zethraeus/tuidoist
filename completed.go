@@ -181,8 +181,8 @@ func (v CompletedView) Update(msg tea.Msg) (CompletedView, tea.Cmd) {
 		return v, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "j", "down":
+		switch ResolveAction(ContextCompletedOverlay, msg.String()) {
+		case ActionNavDown:
 			if v.cursor < len(v.items)-1 {
 				v.cursor++
 				// Skip section headers
@@ -194,7 +194,7 @@ func (v CompletedView) Update(msg tea.Msg) (CompletedView, tea.Cmd) {
 			}
 			v.ensureVisible(v.height)
 			return v, nil
-		case "k", "up":
+		case ActionNavUp:
 			if v.cursor > 0 {
 				v.cursor--
 				if v.cursor >= 0 && v.items[v.cursor].kind == ciSectionHeader {
@@ -205,7 +205,7 @@ func (v CompletedView) Update(msg tea.Msg) (CompletedView, tea.Cmd) {
 			}
 			v.ensureVisible(v.height)
 			return v, nil
-		case "enter", " ":
+		case ActionConfirm:
 			if v.cursor >= 0 && v.cursor < len(v.items) {
 				item := v.items[v.cursor]
 				switch item.kind {
@@ -224,7 +224,7 @@ func (v CompletedView) Update(msg tea.Msg) (CompletedView, tea.Cmd) {
 				}
 			}
 			return v, nil
-		case "u":
+		case ActionUnarchive:
 			if v.cursor >= 0 && v.cursor < len(v.items) {
 				item := v.items[v.cursor]
 				if item.kind == ciArchivedProject && item.project != nil {
@@ -242,12 +242,7 @@ func (v *CompletedView) ensureVisible(height int) {
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
-	if v.cursor < v.scrollOffset {
-		v.scrollOffset = v.cursor
-	}
-	if v.cursor >= v.scrollOffset+visibleHeight {
-		v.scrollOffset = v.cursor - visibleHeight + 1
-	}
+	listEnsureVisible(v.cursor, &v.scrollOffset, visibleHeight)
 }
 
 func (v *CompletedView) SetSize(height int) {
@@ -346,4 +341,3 @@ func (v CompletedView) View(width, height int) string {
 
 	return helpStyle.Width(width).Height(height).Render(b.String())
 }
-

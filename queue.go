@@ -11,9 +11,10 @@ import (
 
 // QueueView displays pending and conflicted mutations
 type QueueView struct {
-	repo      *Repository
-	mutations []Mutation
-	cursor    int
+	repo         *Repository
+	mutations    []Mutation
+	cursor       int
+	confirmClear string // "", "conflicts", "all"
 }
 
 func NewQueueView(repo *Repository) QueueView {
@@ -104,18 +105,38 @@ func (v QueueView) Update(msg tea.Msg) (QueueView, tea.Cmd) {
 		return v, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "j", "down":
+		if v.confirmClear != "" {
+			switch ResolveAction(ContextMainSidebarDialog, msg.String()) {
+			case ActionConfirm:
+				mode := v.confirmClear
+				v.confirmClear = ""
+				switch mode {
+				case "conflicts":
+					v.clearConflictsLocal()
+					return v, v.repo.DismissConflictedMutations()
+				case "all":
+					v.clearAllLocal()
+					return v, v.repo.DismissAllMutations()
+				}
+				return v, nil
+			case ActionCancel:
+				v.confirmClear = ""
+				return v, nil
+			}
+			return v, nil
+		}
+		switch ResolveAction(ContextQueueOverlay, msg.String()) {
+		case ActionNavDown:
 			if v.cursor < len(v.mutations)-1 {
 				v.cursor++
 			}
 			return v, nil
-		case "k", "up":
+		case ActionNavUp:
 			if v.cursor > 0 {
 				v.cursor--
 			}
 			return v, nil
-		case "r":
+		case ActionRetry:
 			if v.cursor >= 0 && v.cursor < len(v.mutations) {
 				m := v.mutations[v.cursor]
 				if m.Status == MutationConflicted || m.Status == MutationFlushing {
@@ -123,7 +144,7 @@ func (v QueueView) Update(msg tea.Msg) (QueueView, tea.Cmd) {
 				}
 			}
 			return v, nil
-		case "d":
+		case ActionDismiss:
 			if v.cursor >= 0 && v.cursor < len(v.mutations) {
 				m := v.mutations[v.cursor]
 				cmd := v.repo.DismissMutation(m.ID)
@@ -136,6 +157,12 @@ func (v QueueView) Update(msg tea.Msg) (QueueView, tea.Cmd) {
 				}
 				return v, cmd
 			}
+			return v, nil
+		case ActionClearConflicts:
+			v.confirmClear = "conflicts"
+			return v, nil
+		case ActionClearAll:
+			v.confirmClear = "all"
 			return v, nil
 		}
 	}
@@ -211,12 +238,47 @@ func (v QueueView) View(width, height int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footerKeyStyle.Render("j/k") + " nav  " +
-		footerKeyStyle.Render("r") + " retry  " +
-		footerKeyStyle.Render("d") + " dismiss  " +
-		footerKeyStyle.Render("Q") + " close")
+	if v.confirmClear != "" {
+		label := "Clear conflicted mutations?"
+		if v.confirmClear == "all" {
+			label = "Clear all mutations?"
+		}
+		b.WriteString(queueConflictStyle.Render(label))
+		b.WriteString("\n")
+		b.WriteString(footerKeyStyle.Render("enter") + " yes  " +
+			footerKeyStyle.Render("esc") + " no")
+	} else {
+		b.WriteString(footerKeyStyle.Render("j/k") + " nav  " +
+			footerKeyStyle.Render("r") + " retry  " +
+			footerKeyStyle.Render("d") + " dismiss  " +
+			footerKeyStyle.Render("x") + " clear conflicts  " +
+			footerKeyStyle.Render("X") + " clear all  " +
+			footerKeyStyle.Render("Q") + " close")
+	}
 
 	return helpStyle.Width(width).Height(height).Render(b.String())
+}
+
+func (v *QueueView) clearConflictsLocal() {
+	filtered := v.mutations[:0]
+	for _, m := range v.mutations {
+		if m.Status == MutationConflicted {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	v.mutations = filtered
+	if v.cursor >= len(v.mutations) {
+		v.cursor = len(v.mutations) - 1
+	}
+	if v.cursor < 0 {
+		v.cursor = 0
+	}
+}
+
+func (v *QueueView) clearAllLocal() {
+	v.mutations = nil
+	v.cursor = 0
 }
 
 type indexedMutation struct {
@@ -247,6 +309,13 @@ func renderMutationLine(m Mutation) string {
 		desc = describeFromSnapshot(m, "Delete")
 	case MutationReopen:
 		desc = describeFromSnapshot(m, "Reopen")
+	case MutationQuickAdd:
+		var req quickAddMutationPayload
+		if json.Unmarshal([]byte(m.Payload), &req) == nil {
+			desc = fmt.Sprintf("Quick add %q", truncate(req.Text, 40))
+		} else {
+			desc = "Quick add task"
+		}
 	}
 
 	return fmt.Sprintf("%s %s", icon, desc)
@@ -268,6 +337,11 @@ func describeUpdate(m Mutation) string {
 	}
 	if req.DueString != nil {
 		changes = append(changes, fmt.Sprintf("due→%q", *req.DueString))
+	}
+	if req.ClearDeadline {
+		changes = append(changes, "deadline→clear")
+	} else if req.DeadlineDate != nil {
+		changes = append(changes, fmt.Sprintf("deadline→%q", *req.DeadlineDate))
 	}
 	if req.Description != nil {
 		changes = append(changes, "description")

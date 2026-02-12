@@ -33,10 +33,11 @@ type TasksView struct {
 	projectName string
 
 	// Dialog state
-	mode      string // "", "quick-add", "edit", "delete", "due"
-	editInput textinput.Model
-	dueInput   textinput.Model
-	quickInput textinput.Model
+	mode            string // "", "quick-add", "edit", "delete", "due", "deadline"
+	editInput       textinput.Model
+	dueInput        textinput.Model
+	deadlineInput   textinput.Model
+	quickInput      textinput.Model
 	quickAddProject string // project name to default to for quick-add (empty = Inbox)
 
 	// Scroll offset
@@ -68,6 +69,10 @@ func NewTasksView(repo *Repository) TasksView {
 	di.Placeholder = "e.g. tomorrow, next monday, every day"
 	di.CharLimit = 200
 
+	dli := textinput.New()
+	dli.Placeholder = "YYYY-MM-DD (empty to clear)"
+	dli.CharLimit = 32
+
 	qi := textinput.New()
 	qi.Placeholder = "Buy milk tomorrow #Work @urgent p1"
 	qi.CharLimit = 500
@@ -77,11 +82,12 @@ func NewTasksView(repo *Repository) TasksView {
 	si.CharLimit = 200
 
 	return TasksView{
-		repo:        repo,
-		editInput:   ei,
-		dueInput:    di,
-		quickInput:  qi,
-		searchInput: si,
+		repo:          repo,
+		editInput:     ei,
+		dueInput:      di,
+		deadlineInput: dli,
+		quickInput:    qi,
+		searchInput:   si,
 	}
 }
 
@@ -253,10 +259,16 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 				return toastMsg{text: "Quick add failed: " + msg.err.Error(), isError: true}
 			}
 		}
-		// Refresh tasks
+		if msg.task != nil && msg.task.ProjectID == v.projectID {
+			v.tasks = append(v.tasks, *msg.task)
+			v.rebuildItems()
+			v.clampCursor()
+			return v, func() tea.Msg { return toastMsg{text: "Task queued", isError: false} }
+		}
+		// Unknown project destination: refresh current list for eventual consistency.
 		return v, tea.Batch(
 			v.repo.RefreshTasks(v.projectID),
-			func() tea.Msg { return toastMsg{text: "Task added", isError: false} },
+			func() tea.Msg { return toastMsg{text: "Task queued", isError: false} },
 		)
 
 	case tea.KeyMsg:
@@ -277,6 +289,11 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 		v.dueInput, cmd = v.dueInput.Update(msg)
 		return v, cmd
 	}
+	if v.mode == "deadline" {
+		var cmd tea.Cmd
+		v.deadlineInput, cmd = v.deadlineInput.Update(msg)
+		return v, cmd
+	}
 	if v.mode == "quick-add" {
 		var cmd tea.Cmd
 		v.quickInput, cmd = v.quickInput.Update(msg)
@@ -292,12 +309,17 @@ func (v TasksView) Update(msg tea.Msg) (TasksView, tea.Cmd) {
 }
 
 func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
-	key := msg.String()
+	normalAction := ResolveAction(ContextMainTasks, msg.String())
+	if msg.String() == "n" && v.searchQuery != "" {
+		normalAction = ActionSearchNext
+	}
+	if msg.String() == "N" && v.searchQuery != "" {
+		normalAction = ActionSearchPrev
+	}
 
-	// Search mode
 	if v.searchMode {
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextMainTasksSearch, msg.String()) {
+		case ActionConfirm:
 			v.searchMode = false
 			v.searchQuery = strings.TrimSpace(v.searchInput.Value())
 			v.matchIndices = findMatchIndices(v.items, v.searchQuery)
@@ -307,35 +329,33 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 				v.ensureVisible()
 			}
 			return v, nil
-		case "esc":
+		case ActionCancel:
 			v.searchMode = false
 			return v, nil
 		}
 		var cmd tea.Cmd
 		v.searchInput, cmd = v.searchInput.Update(msg)
-		// Live filter as user types
-		q := strings.TrimSpace(v.searchInput.Value())
-		v.matchIndices = findMatchIndices(v.items, q)
+		v.matchIndices = findMatchIndices(v.items, strings.TrimSpace(v.searchInput.Value()))
 		return v, cmd
 	}
 
-	// Dialog mode key handling
 	switch v.mode {
 	case "quick-add":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextMainTasksSearch, msg.String()) {
+		case ActionConfirm:
 			text := strings.TrimSpace(v.quickInput.Value())
 			if text == "" {
 				v.mode = ""
 				return v, nil
 			}
-			// Default to current project if the user didn't specify one
+			defaultProjectID := ""
 			if v.quickAddProject != "" && !strings.Contains(text, "#") {
 				text += " #" + v.quickAddProject
+				defaultProjectID = v.projectID
 			}
 			v.mode = ""
-			return v, v.repo.QuickAdd(text)
-		case "esc":
+			return v, v.repo.QuickAdd(text, defaultProjectID)
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -344,8 +364,8 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 		return v, cmd
 
 	case "edit":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextMainTasksSearch, msg.String()) {
+		case ActionConfirm:
 			content := strings.TrimSpace(v.editInput.Value())
 			if content == "" {
 				v.mode = ""
@@ -358,7 +378,7 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 			}
 			v.mode = ""
 			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{Content: &content})
-		case "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -367,8 +387,8 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 		return v, cmd
 
 	case "due":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextMainTasksSearch, msg.String()) {
+		case ActionConfirm:
 			dueStr := strings.TrimSpace(v.dueInput.Value())
 			task := v.selectedTask()
 			if task == nil {
@@ -381,7 +401,7 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 				return v, v.repo.UpdateTask(task.ID, updateTaskRequest{DueString: &empty})
 			}
 			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{DueString: &dueStr})
-		case "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -389,9 +409,31 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 		v.dueInput, cmd = v.dueInput.Update(msg)
 		return v, cmd
 
+	case "deadline":
+		switch ResolveAction(ContextMainTasksSearch, msg.String()) {
+		case ActionConfirm:
+			deadlineStr := strings.TrimSpace(v.deadlineInput.Value())
+			task := v.selectedTask()
+			if task == nil {
+				v.mode = ""
+				return v, nil
+			}
+			v.mode = ""
+			if deadlineStr == "" {
+				return v, v.repo.UpdateTask(task.ID, updateTaskRequest{ClearDeadline: true})
+			}
+			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{DeadlineDate: &deadlineStr})
+		case ActionCancel:
+			v.mode = ""
+			return v, nil
+		}
+		var cmd tea.Cmd
+		v.deadlineInput, cmd = v.deadlineInput.Update(msg)
+		return v, cmd
+
 	case "delete":
-		switch key {
-		case "y", "enter":
+		switch ResolveAction(ContextMainSidebarDialog, msg.String()) {
+		case ActionConfirm:
 			task := v.selectedTask()
 			if task != nil {
 				v.mode = ""
@@ -399,21 +441,20 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 			}
 			v.mode = ""
 			return v, nil
-		case "n", "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
 		return v, nil
 	}
 
-	// Normal mode
-	switch key {
-	case "/":
+	switch normalAction {
+	case ActionSearchLocal:
 		v.searchMode = true
 		v.searchInput.Reset()
 		v.searchInput.Focus()
 		return v, textinput.Blink
-	case "n":
+	case ActionSearchNext:
 		if v.searchQuery != "" && len(v.matchIndices) > 0 {
 			idx, num := nextMatchIndex(v.matchIndices, v.cursor)
 			if idx >= 0 {
@@ -423,7 +464,7 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 			}
 		}
 		return v, nil
-	case "N":
+	case ActionSearchPrev:
 		if v.searchQuery != "" && len(v.matchIndices) > 0 {
 			idx, num := prevMatchIndex(v.matchIndices, v.cursor)
 			if idx >= 0 {
@@ -433,35 +474,29 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 			}
 		}
 		return v, nil
-	case "esc":
+	case ActionClearSearch:
 		if v.searchQuery != "" {
 			v.searchQuery = ""
 			v.matchIndices = nil
 			v.currentMatch = 0
-			return v, nil
 		}
 		return v, nil
-	case "j", "down":
+	case ActionNavDown:
 		v.moveDown()
 		v.ensureVisible()
 		return v, nil
-	case "k", "up":
+	case ActionNavUp:
 		v.moveUp()
 		v.ensureVisible()
 		return v, nil
-	case "g":
-		v.cursor = 0
-		v.scrollOffset = 0
-		v.skipToNextTask(1)
+	case ActionNavTop:
+		listJumpTop(&v.cursor, &v.scrollOffset, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 		return v, nil
-	case "G":
-		if len(v.items) > 0 {
-			v.cursor = len(v.items) - 1
-			v.skipToNextTask(-1)
-			v.ensureVisible()
-		}
+	case ActionNavBottom:
+		listJumpBottom(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
+		v.ensureVisible()
 		return v, nil
-	case "x", " ":
+	case ActionToggleDone:
 		item := v.selectedItem()
 		if item != nil && item.task != nil {
 			if item.completed {
@@ -469,7 +504,7 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 			}
 			return v, v.repo.CloseTask(item.task.ID)
 		}
-	case "e":
+	case ActionEditTask:
 		task := v.selectedTask()
 		if task != nil {
 			v.mode = "edit"
@@ -477,27 +512,64 @@ func (v TasksView) handleKey(msg tea.KeyMsg) (TasksView, tea.Cmd) {
 			v.editInput.Focus()
 			return v, textinput.Blink
 		}
-	case "d":
-		task := v.selectedTask()
-		if task != nil {
+	case ActionDeleteTask:
+		if v.selectedTask() != nil {
 			v.mode = "delete"
 		}
 		return v, nil
-	case "s":
+	case ActionSetDue:
 		task := v.selectedTask()
 		if task != nil {
 			v.mode = "due"
 			v.dueInput.Reset()
 			if task.Due != nil {
-				v.dueInput.SetValue(task.Due.String)
+				if task.Due.String != "" {
+					v.dueInput.SetValue(task.Due.String)
+				} else {
+					v.dueInput.SetValue(task.Due.Date)
+				}
 			}
 			v.dueInput.Focus()
 			return v, textinput.Blink
 		}
-	case "1", "2", "3", "4":
+	case ActionSetDeadline:
 		task := v.selectedTask()
 		if task != nil {
-			p := int(key[0] - '0')
+			v.mode = "deadline"
+			v.deadlineInput.Reset()
+			if task.Deadline != nil {
+				v.deadlineInput.SetValue(task.Deadline.Date)
+			}
+			v.deadlineInput.Focus()
+			return v, textinput.Blink
+		}
+	case ActionClearDates:
+		task := v.selectedTask()
+		if task == nil {
+			return v, nil
+		}
+		if task.Due == nil && task.Deadline == nil {
+			return v, func() tea.Msg {
+				return toastMsg{text: "Task has no due/deadline to clear", isError: true}
+			}
+		}
+		empty := ""
+		return v, v.repo.UpdateTask(task.ID, updateTaskRequest{
+			DueString:     &empty,
+			ClearDeadline: true,
+		})
+	case ActionSetPriority1, ActionSetPriority2, ActionSetPriority3, ActionSetPriority4:
+		task := v.selectedTask()
+		if task != nil {
+			p := 1
+			switch normalAction {
+			case ActionSetPriority2:
+				p = 2
+			case ActionSetPriority3:
+				p = 3
+			case ActionSetPriority4:
+				p = 4
+			}
 			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{Priority: &p})
 		}
 	}
@@ -526,6 +598,8 @@ func (v TasksView) View() string {
 	}
 
 	var b strings.Builder
+	mutationStatus := v.repo.TaskMutationStatusMap()
+	assigneeNames := v.repo.GetAssigneeNameMap()
 
 	// Title
 	title := lipgloss.NewStyle().
@@ -559,7 +633,7 @@ func (v TasksView) View() string {
 		task := item.task
 		selected := i == v.cursor && v.focused
 
-		line := v.renderTask(task, selected, item.completed)
+		line := v.renderTask(task, selected, item.completed, mutationStatus[task.ID], assigneeNames)
 		b.WriteString(line)
 		if i < end-1 {
 			b.WriteString("\n")
@@ -575,8 +649,8 @@ func (v TasksView) View() string {
 	return b.String()
 }
 
-func (v TasksView) renderTask(task *Task, selected bool, completed bool) string {
-	maxContentWidth := v.width - 20
+func (v TasksView) renderTask(task *Task, selected bool, completed bool, syncStatus MutationStatus, assigneeNames map[string]string) string {
+	maxContentWidth := v.width - 34
 	if maxContentWidth < 20 {
 		maxContentWidth = 20
 	}
@@ -602,8 +676,14 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 				parts = append(parts, dueText)
 			}
 		}
+		if deadlineText := formatDeadline(task.Deadline); deadlineText != "" {
+			parts = append(parts, deadlineText)
+		}
 		if task.Priority > 0 && task.Priority < 4 {
 			parts = append(parts, priorityLabel(task.Priority))
+		}
+		if assignee := formatAssignee(task, assigneeNames); assignee != "" {
+			parts = append(parts, assignee)
 		}
 		if len(task.Labels) > 0 {
 			lbls := make([]string, len(task.Labels))
@@ -611,6 +691,9 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 				lbls[i] = "@" + l
 			}
 			parts = append(parts, strings.Join(lbls, " "))
+		}
+		if badge := mutationBadgePlain(syncStatus); badge != "" {
+			parts = append(parts, badge)
 		}
 		return lipgloss.NewStyle().
 			Background(colorBgHL).
@@ -656,10 +739,24 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 			parts = append(parts, dueText)
 		}
 	}
+	if deadlineText := formatDeadline(task.Deadline); deadlineText != "" {
+		if isDeadlineOverdue(task.Deadline) {
+			deadlineText = dueOverdueStyle.Render(deadlineText)
+		} else if isDeadlineToday(task.Deadline) {
+			deadlineText = dueTodayStyle.Render(deadlineText)
+		} else {
+			deadlineText = deadlineStyle.Render(deadlineText)
+		}
+		parts = append(parts, deadlineText)
+	}
 
 	if task.Priority > 0 && task.Priority < 4 {
 		pl := priorityLabel(task.Priority)
 		parts = append(parts, priorityStyle(task.Priority).Render(pl))
+	}
+
+	if assignee := formatAssignee(task, assigneeNames); assignee != "" {
+		parts = append(parts, assigneeStyle.Render(assignee))
 	}
 
 	if len(task.Labels) > 0 {
@@ -668,6 +765,10 @@ func (v TasksView) renderTask(task *Task, selected bool, completed bool) string 
 			lbls[i] = "@" + l
 		}
 		parts = append(parts, labelStyle.Render(strings.Join(lbls, " ")))
+	}
+
+	if badge := mutationBadgeStyled(syncStatus); badge != "" {
+		parts = append(parts, badge)
 	}
 
 	return "  " + strings.Join(parts, "  ")
@@ -689,8 +790,14 @@ func (v TasksView) renderDialog() string {
 	case "due":
 		return dialogStyle.Width(v.width - 4).Render(
 			dialogTitleStyle.Render("Set Due Date") + "\n" +
-				inputLabelStyle.Render("e.g. today, tomorrow, next monday, every friday") + "\n" +
+				inputLabelStyle.Render("e.g. today, tomorrow, next monday, every friday (empty to clear)") + "\n" +
 				v.dueInput.View(),
+		)
+	case "deadline":
+		return dialogStyle.Width(v.width - 4).Render(
+			dialogTitleStyle.Render("Set Deadline") + "\n" +
+				inputLabelStyle.Render("YYYY-MM-DD (empty to clear)") + "\n" +
+				v.deadlineInput.View(),
 		)
 	case "delete":
 		task := v.selectedTask()
@@ -713,6 +820,7 @@ func (v *TasksView) SetSize(width, height int) {
 	v.height = height
 	v.editInput.Width = width - 8
 	v.dueInput.Width = width - 8
+	v.deadlineInput.Width = width - 8
 	v.quickInput.Width = width - 8
 	v.searchInput.Width = 30
 }
@@ -723,6 +831,42 @@ func (v *TasksView) SetFocused(focused bool) {
 
 func (v TasksView) handlesInput() bool {
 	return v.mode != "" || v.searchMode
+}
+
+func (v TasksView) IsSearchMode() bool {
+	return v.searchMode
+}
+
+func (v TasksView) HasSearchQuery() bool {
+	return v.searchQuery != ""
+}
+
+func (v TasksView) IsQuickAddOpen() bool {
+	return v.mode == "quick-add"
+}
+
+func (v TasksView) OpenQuickAdd(defaultProject string) (TasksView, tea.Cmd) {
+	v.mode = "quick-add"
+	v.quickInput.Reset()
+	v.quickInput.Focus()
+	v.quickAddProject = defaultProject
+	return v, textinput.Blink
+}
+
+func (v *TasksView) SetJumpToTask(taskID string) {
+	v.jumpToTaskID = taskID
+}
+
+func (v TasksView) CurrentProjectID() string {
+	return v.projectID
+}
+
+func (v TasksView) CurrentProjectName() string {
+	return v.projectName
+}
+
+func (v TasksView) QuickAddInputView() string {
+	return v.quickInput.View()
 }
 
 // SearchPanel returns the floating search panel content, or "" if inactive.
@@ -802,44 +946,19 @@ func (v *TasksView) rebuildItems() {
 }
 
 func (v *TasksView) clampCursor() {
-	if v.cursor >= len(v.items) {
-		v.cursor = len(v.items) - 1
-	}
-	if v.cursor < 0 {
-		v.cursor = 0
-	}
-	// Skip section headers
-	if v.cursor < len(v.items) && v.items[v.cursor].isSection {
-		v.skipToNextTask(1)
-	}
+	listClampCursor(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TasksView) moveDown() {
-	if v.cursor < len(v.items)-1 {
-		v.cursor++
-		if v.cursor < len(v.items) && v.items[v.cursor].isSection {
-			if v.cursor < len(v.items)-1 {
-				v.cursor++
-			}
-		}
-	}
+	listMoveDown(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TasksView) moveUp() {
-	if v.cursor > 0 {
-		v.cursor--
-		if v.cursor >= 0 && v.items[v.cursor].isSection {
-			if v.cursor > 0 {
-				v.cursor--
-			}
-		}
-	}
+	listMoveUp(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TasksView) skipToNextTask(dir int) {
-	for v.cursor >= 0 && v.cursor < len(v.items) && v.items[v.cursor].isSection {
-		v.cursor += dir
-	}
+	listSkip(&v.cursor, len(v.items), dir, func(idx int) bool { return v.items[idx].isSection })
 	v.clampCursorSimple()
 }
 
@@ -848,12 +967,7 @@ func (v *TasksView) ensureVisible() {
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
-	if v.cursor < v.scrollOffset {
-		v.scrollOffset = v.cursor
-	}
-	if v.cursor >= v.scrollOffset+visibleHeight {
-		v.scrollOffset = v.cursor - visibleHeight + 1
-	}
+	listEnsureVisible(v.cursor, &v.scrollOffset, visibleHeight)
 }
 
 func (v *TasksView) clampCursorSimple() {
@@ -913,4 +1027,3 @@ func (v TasksView) selectedItem() *displayItem {
 	}
 	return nil
 }
-

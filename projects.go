@@ -113,13 +113,11 @@ func (v ProjectsView) Update(msg tea.Msg) (ProjectsView, tea.Cmd) {
 }
 
 func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
-	key := msg.String()
-
 	// Dialog mode
 	switch v.mode {
 	case "add":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextMainTasksSearch, msg.String()) {
+		case ActionConfirm:
 			name := strings.TrimSpace(v.addInput.Value())
 			if name == "" {
 				v.mode = ""
@@ -127,7 +125,7 @@ func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
 			}
 			v.mode = ""
 			return v, v.repo.CreateProject(name)
-		case "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -136,8 +134,8 @@ func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
 		return v, cmd
 
 	case "archive":
-		switch key {
-		case "y", "enter":
+		switch ResolveAction(ContextMainSidebarDialog, msg.String()) {
+		case ActionConfirm:
 			p := v.SelectedProject()
 			if p != nil {
 				v.mode = ""
@@ -145,7 +143,7 @@ func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
 			}
 			v.mode = ""
 			return v, nil
-		case "n", "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -154,29 +152,29 @@ func (v ProjectsView) handleKey(msg tea.KeyMsg) (ProjectsView, tea.Cmd) {
 
 	// Normal mode — bounds: 0 (Today) to len(projects) inclusive
 	maxCursor := len(v.projects) // cursor=len(projects) maps to projects[len-1]
-	switch key {
-	case "j", "down":
+	switch ResolveAction(ContextMainSidebar, msg.String()) {
+	case ActionNavDown:
 		if v.cursor < maxCursor {
 			v.cursor++
 		}
 		return v, nil
-	case "k", "up":
+	case ActionNavUp:
 		if v.cursor > 0 {
 			v.cursor--
 		}
 		return v, nil
-	case "g":
+	case ActionNavTop:
 		v.cursor = 0
 		return v, nil
-	case "G":
+	case ActionNavBottom:
 		v.cursor = maxCursor
 		return v, nil
-	case "a":
+	case ActionAddProject:
 		v.mode = "add"
 		v.addInput.Reset()
 		v.addInput.Focus()
 		return v, textinput.Blink
-	case "d":
+	case ActionArchiveProject:
 		// No-op for Today (cursor=0) or Inbox
 		if v.cursor == 0 {
 			return v, nil
@@ -239,8 +237,8 @@ func (v ProjectsView) View() string {
 						Render(line))
 				}
 			} else {
-				b.WriteString(projectNormalStyle.Width(v.width-2).Render(
-					lipgloss.NewStyle().Foreground(colorYellow).Render("☀")+" Today"))
+				b.WriteString(projectNormalStyle.Width(v.width - 2).Render(
+					lipgloss.NewStyle().Foreground(colorYellow).Render("☀") + " Today"))
 			}
 		} else {
 			// Real project at projects[i-1]
@@ -311,6 +309,10 @@ func (v *ProjectsView) SetSize(width, height int) {
 
 func (v *ProjectsView) SetFocused(focused bool) {
 	v.focused = focused
+}
+
+func (v ProjectsView) DialogMode() string {
+	return v.mode
 }
 
 // SelectedProject returns the currently selected project, or nil if Today is selected.
@@ -396,6 +398,10 @@ func (v *ProjectsView) SelectProjectByID(id string) bool {
 		}
 	}
 	return false
+}
+
+func (v *ProjectsView) SelectToday() {
+	v.cursor = 0
 }
 
 // sortProjects puts Inbox first, then favorites, then the rest by order

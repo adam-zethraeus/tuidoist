@@ -28,11 +28,12 @@ type TriageView struct {
 	changes  triageStats
 
 	// Inline dialogs
-	mode       string // "", "due", "edit", "delete", "quick-add", "label"
-	dueInput   textinput.Model
-	editInput  textinput.Model
-	quickInput textinput.Model
-	labelInput textinput.Model
+	mode          string // "", "due", "deadline", "edit", "delete", "quick-add", "label"
+	dueInput      textinput.Model
+	deadlineInput textinput.Model
+	editInput     textinput.Model
+	quickInput    textinput.Model
+	labelInput    textinput.Model
 }
 
 type triageItem struct {
@@ -55,6 +56,10 @@ func NewTriageView(repo *Repository) TriageView {
 	di.Placeholder = "e.g. tomorrow, next monday, every day"
 	di.CharLimit = 200
 
+	dli := textinput.New()
+	dli.Placeholder = "YYYY-MM-DD (empty to clear)"
+	dli.CharLimit = 32
+
 	ei := textinput.New()
 	ei.Placeholder = "Edit task..."
 	ei.CharLimit = 500
@@ -68,12 +73,13 @@ func NewTriageView(repo *Repository) TriageView {
 	li.CharLimit = 200
 
 	return TriageView{
-		repo:       repo,
-		reviewed:   make(map[string]bool),
-		dueInput:   di,
-		editInput:  ei,
-		quickInput: qi,
-		labelInput: li,
+		repo:          repo,
+		reviewed:      make(map[string]bool),
+		dueInput:      di,
+		deadlineInput: dli,
+		editInput:     ei,
+		quickInput:    qi,
+		labelInput:    li,
 	}
 }
 
@@ -93,6 +99,7 @@ func (v *TriageView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
 	v.dueInput.Width = width - 12
+	v.deadlineInput.Width = width - 12
 	v.editInput.Width = width - 12
 	v.quickInput.Width = width - 12
 	v.labelInput.Width = width - 12
@@ -154,6 +161,10 @@ func (v TriageView) Update(msg tea.Msg) (TriageView, tea.Cmd) {
 	case quickAddMsg:
 		if msg.err == nil {
 			v.changes.added++
+			if msg.task != nil {
+				v.allTasks = append(v.allTasks, *msg.task)
+				v.rebuildItems()
+			}
 		}
 		return v, nil
 
@@ -171,6 +182,10 @@ func (v TriageView) Update(msg tea.Msg) (TriageView, tea.Cmd) {
 		var cmd tea.Cmd
 		v.editInput, cmd = v.editInput.Update(msg)
 		return v, cmd
+	case "deadline":
+		var cmd tea.Cmd
+		v.deadlineInput, cmd = v.deadlineInput.Update(msg)
+		return v, cmd
 	case "quick-add":
 		var cmd tea.Cmd
 		v.quickInput, cmd = v.quickInput.Update(msg)
@@ -185,21 +200,19 @@ func (v TriageView) Update(msg tea.Msg) (TriageView, tea.Cmd) {
 }
 
 func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
-	key := msg.String()
-
 	// Dialog modes
 	switch v.mode {
 	case "quick-add":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextTriageDialog, msg.String()) {
+		case ActionConfirm:
 			text := strings.TrimSpace(v.quickInput.Value())
 			if text == "" {
 				v.mode = ""
 				return v, nil
 			}
 			v.mode = ""
-			return v, v.repo.QuickAdd(text)
-		case "esc":
+			return v, v.repo.QuickAdd(text, "")
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -208,8 +221,8 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, cmd
 
 	case "edit":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextTriageDialog, msg.String()) {
+		case ActionConfirm:
 			content := strings.TrimSpace(v.editInput.Value())
 			if content == "" {
 				v.mode = ""
@@ -223,7 +236,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 			v.mode = ""
 			v.reviewed[task.ID] = true
 			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{Content: &content})
-		case "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -232,8 +245,8 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, cmd
 
 	case "due":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextTriageDialog, msg.String()) {
+		case ActionConfirm:
 			dueStr := strings.TrimSpace(v.dueInput.Value())
 			task := v.selectedTask()
 			if task == nil {
@@ -248,7 +261,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 				return v, v.repo.UpdateTask(task.ID, updateTaskRequest{DueString: &empty})
 			}
 			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{DueString: &dueStr})
-		case "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -256,9 +269,33 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		v.dueInput, cmd = v.dueInput.Update(msg)
 		return v, cmd
 
+	case "deadline":
+		switch ResolveAction(ContextTriageDialog, msg.String()) {
+		case ActionConfirm:
+			deadlineStr := strings.TrimSpace(v.deadlineInput.Value())
+			task := v.selectedTask()
+			if task == nil {
+				v.mode = ""
+				return v, nil
+			}
+			v.mode = ""
+			v.reviewed[task.ID] = true
+			v.changes.rescheduled++
+			if deadlineStr == "" {
+				return v, v.repo.UpdateTask(task.ID, updateTaskRequest{ClearDeadline: true})
+			}
+			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{DeadlineDate: &deadlineStr})
+		case ActionCancel:
+			v.mode = ""
+			return v, nil
+		}
+		var cmd tea.Cmd
+		v.deadlineInput, cmd = v.deadlineInput.Update(msg)
+		return v, cmd
+
 	case "label":
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextTriageDialog, msg.String()) {
+		case ActionConfirm:
 			labelStr := strings.TrimSpace(v.labelInput.Value())
 			task := v.selectedTask()
 			if task == nil {
@@ -276,7 +313,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 				}
 			}
 			return v, v.repo.UpdateTask(task.ID, updateTaskRequest{Labels: labels})
-		case "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -285,8 +322,8 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, cmd
 
 	case "delete":
-		switch key {
-		case "y", "enter":
+		switch ResolveAction(ContextMainSidebarDialog, msg.String()) {
+		case ActionConfirm:
 			task := v.selectedTask()
 			if task != nil {
 				v.reviewed[task.ID] = true
@@ -296,7 +333,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 			}
 			v.mode = ""
 			return v, nil
-		case "n", "esc":
+		case ActionCancel:
 			v.mode = ""
 			return v, nil
 		}
@@ -304,40 +341,35 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 	}
 
 	// Normal mode
-	switch key {
-	case "j", "down":
+	switch ResolveAction(ContextTriageOverlay, msg.String()) {
+	case ActionNavDown:
 		v.moveDown()
 		v.ensureVisible()
 		return v, nil
-	case "k", "up":
+	case ActionNavUp:
 		v.moveUp()
 		v.ensureVisible()
 		return v, nil
-	case "g":
-		v.cursor = 0
-		v.scrollOffset = 0
-		v.skipToNextTask(1)
+	case ActionNavTop:
+		listJumpTop(&v.cursor, &v.scrollOffset, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 		return v, nil
-	case "G":
-		if len(v.items) > 0 {
-			v.cursor = len(v.items) - 1
-			v.skipToNextTask(-1)
-			v.ensureVisible()
-		}
+	case ActionNavBottom:
+		listJumpBottom(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
+		v.ensureVisible()
 		return v, nil
 
 	// Eisenhower quadrant assignment
-	case "1":
+	case ActionSetPriority1:
 		return v.setPriority(1)
-	case "2":
+	case ActionSetPriority2:
 		return v.setPriority(2)
-	case "3":
+	case ActionSetPriority3:
 		return v.setPriority(3)
-	case "0", "4":
+	case ActionClearPriority:
 		return v.setPriority(4) // clear priority
 
 	// Skip / mark reviewed
-	case "enter", " ":
+	case ActionMarkReviewed:
 		task := v.selectedTask()
 		if task != nil {
 			v.reviewed[task.ID] = true
@@ -346,7 +378,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, nil
 
 	// Complete task
-	case "x":
+	case ActionToggleDone:
 		task := v.selectedTask()
 		if task != nil {
 			v.reviewed[task.ID] = true
@@ -356,7 +388,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, nil
 
 	// Delete task
-	case "d", "backspace":
+	case ActionDeleteTask:
 		task := v.selectedTask()
 		if task != nil {
 			v.mode = "delete"
@@ -364,21 +396,56 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, nil
 
 	// Set due date
-	case "s":
+	case ActionSetDue:
 		task := v.selectedTask()
 		if task != nil {
 			v.mode = "due"
 			v.dueInput.Reset()
 			if task.Due != nil {
-				v.dueInput.SetValue(task.Due.String)
+				if task.Due.String != "" {
+					v.dueInput.SetValue(task.Due.String)
+				} else {
+					v.dueInput.SetValue(task.Due.Date)
+				}
 			}
 			v.dueInput.Focus()
 			return v, textinput.Blink
 		}
 		return v, nil
 
+	case ActionSetDeadline:
+		task := v.selectedTask()
+		if task != nil {
+			v.mode = "deadline"
+			v.deadlineInput.Reset()
+			if task.Deadline != nil {
+				v.deadlineInput.SetValue(task.Deadline.Date)
+			}
+			v.deadlineInput.Focus()
+			return v, textinput.Blink
+		}
+		return v, nil
+
+	case ActionClearDates:
+		task := v.selectedTask()
+		if task == nil {
+			return v, nil
+		}
+		if task.Due == nil && task.Deadline == nil {
+			return v, func() tea.Msg {
+				return toastMsg{text: "Task has no due/deadline to clear", isError: true}
+			}
+		}
+		v.reviewed[task.ID] = true
+		v.changes.rescheduled++
+		empty := ""
+		return v, v.repo.UpdateTask(task.ID, updateTaskRequest{
+			DueString:     &empty,
+			ClearDeadline: true,
+		})
+
 	// Edit content
-	case "e":
+	case ActionEditTask:
 		task := v.selectedTask()
 		if task != nil {
 			v.mode = "edit"
@@ -389,7 +456,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, nil
 
 	// Labels
-	case "l":
+	case ActionSetLabels:
 		task := v.selectedTask()
 		if task != nil {
 			v.mode = "label"
@@ -403,7 +470,7 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		return v, nil
 
 	// Quick add
-	case "n":
+	case ActionNewTask:
 		v.mode = "quick-add"
 		v.quickInput.Reset()
 		v.quickInput.Focus()
@@ -428,6 +495,8 @@ func (v *TriageView) setPriority(p int) (TriageView, tea.Cmd) {
 
 func (v TriageView) View(width, height int) string {
 	var b strings.Builder
+	mutationStatus := v.repo.TaskMutationStatusMap()
+	assigneeNames := v.repo.GetAssigneeNameMap()
 
 	// Title + progress
 	totalTasks := len(v.allTasks)
@@ -469,7 +538,7 @@ func (v TriageView) View(width, height int) string {
 
 			task := item.task
 			selected := i == v.cursor
-			line := v.renderTask(task, selected, width-6)
+			line := v.renderTask(task, selected, width-6, mutationStatus[task.ID], assigneeNames)
 			b.WriteString(line)
 			if i < end-1 {
 				b.WriteString("\n")
@@ -581,8 +650,8 @@ func (v TriageView) renderProgress(reviewed, total, barWidth int) string {
 	return bar + triageStatStyle.Render(label)
 }
 
-func (v TriageView) renderTask(task *Task, selected bool, maxW int) string {
-	maxContentWidth := maxW - 30
+func (v TriageView) renderTask(task *Task, selected bool, maxW int, syncStatus MutationStatus, assigneeNames map[string]string) string {
+	maxContentWidth := maxW - 44
 	if maxContentWidth < 20 {
 		maxContentWidth = 20
 	}
@@ -615,8 +684,14 @@ func (v TriageView) renderTask(task *Task, selected bool, maxW int) string {
 				parts = append(parts, dueText)
 			}
 		}
+		if deadlineText := formatDeadline(task.Deadline); deadlineText != "" {
+			parts = append(parts, deadlineText)
+		}
 		if task.Priority > 0 && task.Priority < 4 {
 			parts = append(parts, priorityLabel(task.Priority))
+		}
+		if assignee := formatAssignee(task, assigneeNames); assignee != "" {
+			parts = append(parts, assignee)
 		}
 		if len(task.Labels) > 0 {
 			lbls := make([]string, len(task.Labels))
@@ -624,6 +699,9 @@ func (v TriageView) renderTask(task *Task, selected bool, maxW int) string {
 				lbls[i] = "@" + l
 			}
 			parts = append(parts, strings.Join(lbls, " "))
+		}
+		if badge := mutationBadgePlain(syncStatus); badge != "" {
+			parts = append(parts, badge)
 		}
 		return lipgloss.NewStyle().
 			Background(colorBgHL).
@@ -659,9 +737,23 @@ func (v TriageView) renderTask(task *Task, selected bool, maxW int) string {
 			parts = append(parts, dueText)
 		}
 	}
+	if deadlineText := formatDeadline(task.Deadline); deadlineText != "" {
+		if isDeadlineOverdue(task.Deadline) {
+			deadlineText = dueOverdueStyle.Render(deadlineText)
+		} else if isDeadlineToday(task.Deadline) {
+			deadlineText = dueTodayStyle.Render(deadlineText)
+		} else {
+			deadlineText = deadlineStyle.Render(deadlineText)
+		}
+		parts = append(parts, deadlineText)
+	}
 
 	if task.Priority > 0 && task.Priority < 4 {
 		parts = append(parts, priorityStyle(task.Priority).Render(priorityLabel(task.Priority)))
+	}
+
+	if assignee := formatAssignee(task, assigneeNames); assignee != "" {
+		parts = append(parts, assigneeStyle.Render(assignee))
 	}
 
 	if len(task.Labels) > 0 {
@@ -670,6 +762,10 @@ func (v TriageView) renderTask(task *Task, selected bool, maxW int) string {
 			lbls[i] = "@" + l
 		}
 		parts = append(parts, labelStyle.Render(strings.Join(lbls, " ")))
+	}
+
+	if badge := mutationBadgeStyled(syncStatus); badge != "" {
+		parts = append(parts, badge)
 	}
 
 	return "  " + strings.Join(parts, "  ")
@@ -698,6 +794,12 @@ func (v TriageView) renderDialog(width int) string {
 			dialogTitleStyle.Render("Set Due Date") + "\n" +
 				inputLabelStyle.Render("e.g. today, tomorrow, next monday, every friday, (empty to clear)") + "\n" +
 				v.dueInput.View(),
+		)
+	case "deadline":
+		return dialogStyle.Width(dialogW).Render(
+			dialogTitleStyle.Render("Set Deadline") + "\n" +
+				inputLabelStyle.Render("YYYY-MM-DD (empty to clear)") + "\n" +
+				v.deadlineInput.View(),
 		)
 	case "label":
 		return dialogStyle.Width(dialogW).Render(
@@ -758,6 +860,8 @@ func (v TriageView) renderFooter() string {
 		keyHint("3", "deleg") + "  " +
 		keyHint("0", "clear") + "  " +
 		keyHint("s", "due") + "  " +
+		keyHint("S", "deadline") + "  " +
+		keyHint("-", "clr dates") + "  " +
 		keyHint("e", "edit") + "  " +
 		keyHint("l", "labels") + "  " +
 		keyHint("x", "done") + "  " +
@@ -798,20 +902,30 @@ func (v *TriageView) rebuildItems() {
 
 	// Sort each: overdue first, then by date, then alphabetical
 	triageSort := func(tasks []Task) {
+		dateKey := func(t Task) string {
+			if t.Due != nil && t.Due.Date != "" {
+				return t.Due.Date
+			}
+			if t.Deadline != nil {
+				return t.Deadline.Date
+			}
+			return ""
+		}
 		sort.Slice(tasks, func(i, j int) bool {
-			iOver := isOverdue(tasks[i].Due)
-			jOver := isOverdue(tasks[j].Due)
+			iOver := isTaskOverdue(&tasks[i])
+			jOver := isTaskOverdue(&tasks[j])
 			if iOver != jOver {
 				return iOver
 			}
-			if tasks[i].Due != nil && tasks[j].Due != nil {
-				return tasks[i].Due.Date < tasks[j].Due.Date
-			}
-			if tasks[i].Due != nil {
-				return true
-			}
-			if tasks[j].Due != nil {
-				return false
+			di, dj := dateKey(tasks[i]), dateKey(tasks[j])
+			if di != dj {
+				if di == "" {
+					return false
+				}
+				if dj == "" {
+					return true
+				}
+				return di < dj
 			}
 			return tasks[i].Content < tasks[j].Content
 		})
@@ -855,49 +969,19 @@ func (v *TriageView) rebuildItems() {
 // --- Navigation ---
 
 func (v *TriageView) moveDown() {
-	if v.cursor < len(v.items)-1 {
-		v.cursor++
-		if v.cursor < len(v.items) && v.items[v.cursor].isSection {
-			if v.cursor < len(v.items)-1 {
-				v.cursor++
-			}
-		}
-	}
+	listMoveDown(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TriageView) moveUp() {
-	if v.cursor > 0 {
-		v.cursor--
-		if v.cursor >= 0 && v.items[v.cursor].isSection {
-			if v.cursor > 0 {
-				v.cursor--
-			}
-		}
-	}
+	listMoveUp(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TriageView) skipToNextTask(dir int) {
-	for v.cursor >= 0 && v.cursor < len(v.items) && v.items[v.cursor].isSection {
-		v.cursor += dir
-	}
-	if v.cursor < 0 {
-		v.cursor = 0
-	}
-	if v.cursor >= len(v.items) {
-		v.cursor = len(v.items) - 1
-	}
+	listSkip(&v.cursor, len(v.items), dir, func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TriageView) clampCursor() {
-	if v.cursor >= len(v.items) {
-		v.cursor = len(v.items) - 1
-	}
-	if v.cursor < 0 {
-		v.cursor = 0
-	}
-	if v.cursor < len(v.items) && v.items[v.cursor].isSection {
-		v.skipToNextTask(1)
-	}
+	listClampCursor(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TriageView) ensureVisible() {
@@ -905,12 +989,7 @@ func (v *TriageView) ensureVisible() {
 	if listHeight < 1 {
 		listHeight = 1
 	}
-	if v.cursor < v.scrollOffset {
-		v.scrollOffset = v.cursor
-	}
-	if v.cursor >= v.scrollOffset+listHeight {
-		v.scrollOffset = v.cursor - listHeight + 1
-	}
+	listEnsureVisible(v.cursor, &v.scrollOffset, listHeight)
 }
 
 func (v *TriageView) advanceToNextUnreviewed() {

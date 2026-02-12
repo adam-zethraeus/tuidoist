@@ -47,24 +47,33 @@ type Due struct {
 	IsRecurring bool    `json:"is_recurring"`
 }
 
+// Deadline represents a task deadline date (non-recurring date only).
+type Deadline struct {
+	Date string  `json:"date"`
+	Lang *string `json:"lang"`
+}
+
 // Task represents a Todoist task
 type Task struct {
-	ID           string   `json:"id"`
-	UserID       string   `json:"user_id"`
-	ProjectID    string   `json:"project_id"`
-	SectionID    string   `json:"section_id"`
-	ParentID     *string  `json:"parent_id"`
-	Content      string   `json:"content"`
-	Description  string   `json:"description"`
-	Priority     int      `json:"priority"`
-	Due          *Due     `json:"due"`
-	Labels       []string `json:"labels"`
-	ChildOrder   int      `json:"child_order"`
-	Checked      bool     `json:"checked"`
-	IsDeleted    bool     `json:"is_deleted"`
-	AddedAt      string   `json:"added_at"`
-	CompletedAt  *string  `json:"completed_at"`
-	NoteCount    int      `json:"note_count"`
+	ID             string    `json:"id"`
+	UserID         string    `json:"user_id"`
+	ProjectID      string    `json:"project_id"`
+	SectionID      string    `json:"section_id"`
+	ParentID       *string   `json:"parent_id"`
+	AssignedByUID  *string   `json:"assigned_by_uid"`
+	ResponsibleUID *string   `json:"responsible_uid"`
+	Content        string    `json:"content"`
+	Description    string    `json:"description"`
+	Priority       int       `json:"priority"`
+	Due            *Due      `json:"due"`
+	Deadline       *Deadline `json:"deadline"`
+	Labels         []string  `json:"labels"`
+	ChildOrder     int       `json:"child_order"`
+	Checked        bool      `json:"checked"`
+	IsDeleted      bool      `json:"is_deleted"`
+	AddedAt        string    `json:"added_at"`
+	CompletedAt    *string   `json:"completed_at"`
+	NoteCount      int       `json:"note_count"`
 }
 
 // Label represents a Todoist label
@@ -90,11 +99,12 @@ type Comment struct {
 type MutationAction string
 
 const (
-	MutationCreate MutationAction = "create"
-	MutationUpdate MutationAction = "update"
-	MutationClose  MutationAction = "close"
-	MutationDelete MutationAction = "delete"
-	MutationReopen MutationAction = "reopen"
+	MutationCreate   MutationAction = "create"
+	MutationUpdate   MutationAction = "update"
+	MutationClose    MutationAction = "close"
+	MutationDelete   MutationAction = "delete"
+	MutationReopen   MutationAction = "reopen"
+	MutationQuickAdd MutationAction = "quick_add"
 )
 
 type MutationStatus string
@@ -107,13 +117,13 @@ const (
 
 type Mutation struct {
 	ID         int64
-	EntityType string         // "task"
-	EntityID   string         // task ID (or temp ID for creates)
+	EntityType string // "task"
+	EntityID   string // task ID (or temp ID for creates)
 	Action     MutationAction
-	Payload    string         // JSON of the request (createTaskRequest or updateTaskRequest)
-	Snapshot   string         // JSON of entity state at mutation time (empty for creates)
+	Payload    string // JSON of the request (createTaskRequest or updateTaskRequest)
+	Snapshot   string // JSON of entity state at mutation time (empty for creates)
 	Status     MutationStatus
-	Conflict   string         // JSON description of conflict (empty if none)
+	Conflict   string // JSON description of conflict (empty if none)
 	CreatedAt  time.Time
 	Attempts   int
 }
@@ -131,20 +141,29 @@ func IsPendingID(id string) bool {
 // --- Message types for async Bubbletea commands ---
 
 type projectsMsg struct {
-	projects []Project
-	err      error
+	projects   []Project
+	err        error
+	fromCache  bool
+	stale      bool
+	lastSynced *time.Time
 }
 
 type tasksMsg struct {
-	projectID string
-	tasks     []Task
-	err       error
+	projectID  string
+	tasks      []Task
+	err        error
+	fromCache  bool
+	stale      bool
+	lastSynced *time.Time
 }
 
 type sectionsMsg struct {
-	projectID string
-	sections  []Section
-	err       error
+	projectID  string
+	sections   []Section
+	err        error
+	fromCache  bool
+	stale      bool
+	lastSynced *time.Time
 }
 
 type labelsMsg struct {
@@ -178,21 +197,29 @@ type taskUpdatedMsg struct {
 }
 
 type quickAddMsg struct {
-	err error
+	err       error
+	task      *Task
+	projectID string
 }
 
 type cachedProjectsMsg struct {
-	projects []Project
+	projects   []Project
+	stale      bool
+	lastSynced *time.Time
 }
 
 type cachedTasksMsg struct {
-	projectID string
-	tasks     []Task
+	projectID  string
+	tasks      []Task
+	stale      bool
+	lastSynced *time.Time
 }
 
 type cachedSectionsMsg struct {
-	projectID string
-	sections  []Section
+	projectID  string
+	sections   []Section
+	stale      bool
+	lastSynced *time.Time
 }
 
 type noopMsg struct{}
@@ -213,6 +240,11 @@ type backgroundRefreshMsg struct {
 }
 type backgroundRefreshDoneMsg struct {
 	remaining []string
+}
+
+type assigneeDirectoryMsg struct {
+	updated int
+	err     error
 }
 
 type commentsMsg struct {
@@ -274,6 +306,14 @@ func formatDue(due *Due) string {
 	return due.Date
 }
 
+// formatDeadline returns a short deadline tag.
+func formatDeadline(deadline *Deadline) string {
+	if deadline == nil || deadline.Date == "" {
+		return ""
+	}
+	return "by " + deadline.Date
+}
+
 // isOverdue checks if a due date is in the past
 func isOverdue(due *Due) bool {
 	if due == nil {
@@ -310,6 +350,20 @@ func isOverdue(due *Due) bool {
 	return false
 }
 
+// isDeadlineOverdue checks if a deadline date is in the past.
+func isDeadlineOverdue(deadline *Deadline) bool {
+	if deadline == nil || deadline.Date == "" {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", deadline.Date)
+	if err != nil {
+		return false
+	}
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return t.Before(today)
+}
+
 // isDueToday checks if a due date is today
 func isDueToday(due *Due) bool {
 	if due == nil {
@@ -322,6 +376,38 @@ func isDueToday(due *Due) bool {
 	now := time.Now()
 	today := now.Format("2006-01-02")
 	return strings.HasPrefix(dateStr, today)
+}
+
+// isDeadlineToday checks if a deadline date is today.
+func isDeadlineToday(deadline *Deadline) bool {
+	if deadline == nil || deadline.Date == "" {
+		return false
+	}
+	return deadline.Date == time.Now().Format("2006-01-02")
+}
+
+func isTaskOverdue(task *Task) bool {
+	if task == nil {
+		return false
+	}
+	return isOverdue(task.Due) || isDeadlineOverdue(task.Deadline)
+}
+
+func formatAssignee(task *Task, nameMap map[string]string) string {
+	if task == nil || task.ResponsibleUID == nil || *task.ResponsibleUID == "" {
+		return ""
+	}
+	uid := *task.ResponsibleUID
+	label := uid
+	if nameMap != nil {
+		if name, ok := nameMap[uid]; ok && name != "" {
+			label = name
+		}
+	}
+	if len(label) > 18 {
+		label = label[:18] + "..."
+	}
+	return "+" + label
 }
 
 // priorityLabel returns a display string for priority
@@ -372,4 +458,3 @@ var colorHex = map[string]string{
 	"grey":        "#999999",
 	"taupe":       "#8F7A69",
 }
-

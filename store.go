@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS labels (
 	id   TEXT PRIMARY KEY,
 	data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS user_names (
+	user_id    TEXT PRIMARY KEY,
+	full_name  TEXT NOT NULL,
+	updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS mutation_queue (
 	id          INTEGER PRIMARY KEY AUTOINCREMENT,
 	entity_type TEXT NOT NULL,
@@ -115,6 +120,23 @@ func (s *Store) TouchSync(resourceType, scopeID string) {
 			"ON CONFLICT(resource_type, scope_id) DO UPDATE SET last_synced = excluded.last_synced",
 		resourceType, scopeID, time.Now().Unix(),
 	)
+}
+
+// LastSynced returns the last sync time for a resource/scope, if present.
+func (s *Store) LastSynced(resourceType, scopeID string) (*time.Time, error) {
+	var ts int64
+	err := s.db.QueryRow(
+		"SELECT last_synced FROM sync_meta WHERE resource_type = ? AND scope_id = ?",
+		resourceType, scopeID,
+	).Scan(&ts)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	t := time.Unix(ts, 0)
+	return &t, nil
 }
 
 // --- Projects ---
@@ -569,4 +591,62 @@ func scanMutation(row scannable) (*Mutation, error) {
 	m.Status = MutationStatus(status)
 	m.CreatedAt = time.Unix(createdAt, 0)
 	return &m, nil
+}
+
+// --- Assignee name directory ---
+
+// GetUserNames returns cached assignee names keyed by user ID.
+func (s *Store) GetUserNames() (map[string]string, error) {
+	rows, err := s.db.Query("SELECT user_id, full_name FROM user_names")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		if id == "" || name == "" {
+			continue
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+// UpsertUserNames writes or updates assignee names in a transaction.
+func (s *Store) UpsertUserNames(names map[string]string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO user_names (user_id, full_name, updated_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(user_id) DO UPDATE SET full_name = excluded.full_name, updated_at = excluded.updated_at`,
+	)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().Unix()
+	for id, name := range names {
+		if id == "" || name == "" {
+			continue
+		}
+		if _, err := stmt.Exec(id, name, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }

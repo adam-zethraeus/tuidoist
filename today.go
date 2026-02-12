@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,6 +28,10 @@ type TodayView struct {
 	searchQuery  string
 	matchIndices []int
 	currentMatch int
+
+	mode          string // "", "due", "deadline"
+	dueInput      textinput.Model
+	deadlineInput textinput.Model
 }
 
 func NewTodayView(repo *Repository) TodayView {
@@ -36,7 +39,20 @@ func NewTodayView(repo *Repository) TodayView {
 	si.Placeholder = "Search..."
 	si.CharLimit = 200
 
-	return TodayView{repo: repo, searchInput: si}
+	di := textinput.New()
+	di.Placeholder = "e.g. today, tomorrow, next monday, every day"
+	di.CharLimit = 200
+
+	dli := textinput.New()
+	dli.Placeholder = "YYYY-MM-DD (empty to clear)"
+	dli.CharLimit = 32
+
+	return TodayView{
+		repo:          repo,
+		searchInput:   si,
+		dueInput:      di,
+		deadlineInput: dli,
+	}
 }
 
 func (v *TodayView) Refresh() {
@@ -48,17 +64,16 @@ func (v *TodayView) Refresh() {
 	v.currentMatch = 0
 
 	var overdue, today, upcoming []Task
-	now := time.Now()
-	todayStr := now.Format("2006-01-02")
 
 	for _, task := range allTasks {
-		if task.Due == nil || task.Due.Date == "" {
+		hasDue := task.Due != nil && task.Due.Date != ""
+		hasDeadline := task.Deadline != nil && task.Deadline.Date != ""
+		if !hasDue && !hasDeadline {
 			continue
 		}
-		dateStr := task.Due.Date
-		if isOverdue(task.Due) {
+		if isTaskOverdue(&task) {
 			overdue = append(overdue, task)
-		} else if strings.HasPrefix(dateStr, todayStr) {
+		} else if isDueToday(task.Due) || isDeadlineToday(task.Deadline) {
 			today = append(today, task)
 		} else {
 			// Future — candidate for Up Next
@@ -68,7 +83,7 @@ func (v *TodayView) Refresh() {
 
 	// Sort overdue: date ascending, then priority descending
 	sort.Slice(overdue, func(i, j int) bool {
-		di, dj := overdue[i].Due.Date, overdue[j].Due.Date
+		di, dj := todaySortDateKey(overdue[i]), todaySortDateKey(overdue[j])
 		if di != dj {
 			return di < dj
 		}
@@ -85,7 +100,7 @@ func (v *TodayView) Refresh() {
 
 	// Sort upcoming: date ascending, then priority descending
 	sort.Slice(upcoming, func(i, j int) bool {
-		di, dj := upcoming[i].Due.Date, upcoming[j].Due.Date
+		di, dj := todaySortDateKey(upcoming[i]), todaySortDateKey(upcoming[j])
 		if di != dj {
 			return di < dj
 		}
@@ -131,6 +146,17 @@ func (v *TodayView) Refresh() {
 
 func (v TodayView) Update(msg tea.Msg) (TodayView, tea.Cmd) {
 	switch msg := msg.(type) {
+	case taskUpdatedMsg:
+		if msg.err == nil {
+			v.Refresh()
+			return v, func() tea.Msg {
+				return toastMsg{text: "Task updated", isError: false}
+			}
+		}
+		return v, func() tea.Msg {
+			return toastMsg{text: "Failed to update task: " + msg.err.Error(), isError: true}
+		}
+
 	case taskClosedMsg:
 		if msg.err == nil {
 			v.Refresh()
@@ -166,17 +192,71 @@ func (v TodayView) Update(msg tea.Msg) (TodayView, tea.Cmd) {
 		v.searchInput, cmd = v.searchInput.Update(msg)
 		return v, cmd
 	}
+	if v.mode == "due" {
+		var cmd tea.Cmd
+		v.dueInput, cmd = v.dueInput.Update(msg)
+		return v, cmd
+	}
+	if v.mode == "deadline" {
+		var cmd tea.Cmd
+		v.deadlineInput, cmd = v.deadlineInput.Update(msg)
+		return v, cmd
+	}
 
 	return v, nil
 }
 
 func (v TodayView) handleKey(msg tea.KeyMsg) (TodayView, tea.Cmd) {
-	key := msg.String()
+	switch v.mode {
+	case "due":
+		switch ResolveAction(ContextMainTodayDialog, msg.String()) {
+		case ActionConfirm:
+			dueStr := strings.TrimSpace(v.dueInput.Value())
+			item := v.selectedItem()
+			if item == nil || item.task == nil {
+				v.mode = ""
+				return v, nil
+			}
+			v.mode = ""
+			if dueStr == "" {
+				empty := ""
+				return v, v.repo.UpdateTask(item.task.ID, updateTaskRequest{DueString: &empty})
+			}
+			return v, v.repo.UpdateTask(item.task.ID, updateTaskRequest{DueString: &dueStr})
+		case ActionCancel:
+			v.mode = ""
+			return v, nil
+		}
+		var cmd tea.Cmd
+		v.dueInput, cmd = v.dueInput.Update(msg)
+		return v, cmd
 
-	// Search mode
+	case "deadline":
+		switch ResolveAction(ContextMainTodayDialog, msg.String()) {
+		case ActionConfirm:
+			deadlineStr := strings.TrimSpace(v.deadlineInput.Value())
+			item := v.selectedItem()
+			if item == nil || item.task == nil {
+				v.mode = ""
+				return v, nil
+			}
+			v.mode = ""
+			if deadlineStr == "" {
+				return v, v.repo.UpdateTask(item.task.ID, updateTaskRequest{ClearDeadline: true})
+			}
+			return v, v.repo.UpdateTask(item.task.ID, updateTaskRequest{DeadlineDate: &deadlineStr})
+		case ActionCancel:
+			v.mode = ""
+			return v, nil
+		}
+		var cmd tea.Cmd
+		v.deadlineInput, cmd = v.deadlineInput.Update(msg)
+		return v, cmd
+	}
+
 	if v.searchMode {
-		switch key {
-		case "enter":
+		switch ResolveAction(ContextMainTodaySearch, msg.String()) {
+		case ActionConfirm:
 			v.searchMode = false
 			v.searchQuery = strings.TrimSpace(v.searchInput.Value())
 			v.matchIndices = findMatchIndices(v.items, v.searchQuery)
@@ -186,7 +266,7 @@ func (v TodayView) handleKey(msg tea.KeyMsg) (TodayView, tea.Cmd) {
 				v.ensureVisible()
 			}
 			return v, nil
-		case "esc":
+		case ActionCancel:
 			v.searchMode = false
 			return v, nil
 		}
@@ -196,13 +276,21 @@ func (v TodayView) handleKey(msg tea.KeyMsg) (TodayView, tea.Cmd) {
 		return v, cmd
 	}
 
-	switch key {
-	case "/":
+	action := ResolveAction(ContextMainToday, msg.String())
+	if msg.String() == "n" && v.searchQuery != "" {
+		action = ActionSearchNext
+	}
+	if msg.String() == "N" && v.searchQuery != "" {
+		action = ActionSearchPrev
+	}
+
+	switch action {
+	case ActionSearchLocal:
 		v.searchMode = true
 		v.searchInput.Reset()
 		v.searchInput.Focus()
 		return v, textinput.Blink
-	case "n":
+	case ActionSearchNext:
 		if v.searchQuery != "" && len(v.matchIndices) > 0 {
 			idx, num := nextMatchIndex(v.matchIndices, v.cursor)
 			if idx >= 0 {
@@ -212,7 +300,7 @@ func (v TodayView) handleKey(msg tea.KeyMsg) (TodayView, tea.Cmd) {
 			}
 		}
 		return v, nil
-	case "N":
+	case ActionSearchPrev:
 		if v.searchQuery != "" && len(v.matchIndices) > 0 {
 			idx, num := prevMatchIndex(v.matchIndices, v.cursor)
 			if idx >= 0 {
@@ -222,35 +310,29 @@ func (v TodayView) handleKey(msg tea.KeyMsg) (TodayView, tea.Cmd) {
 			}
 		}
 		return v, nil
-	case "esc":
+	case ActionClearSearch:
 		if v.searchQuery != "" {
 			v.searchQuery = ""
 			v.matchIndices = nil
 			v.currentMatch = 0
-			return v, nil
 		}
 		return v, nil
-	case "j", "down":
+	case ActionNavDown:
 		v.moveDown()
 		v.ensureVisible()
 		return v, nil
-	case "k", "up":
+	case ActionNavUp:
 		v.moveUp()
 		v.ensureVisible()
 		return v, nil
-	case "g":
-		v.cursor = 0
-		v.scrollOffset = 0
-		v.skipToNextTask(1)
+	case ActionNavTop:
+		listJumpTop(&v.cursor, &v.scrollOffset, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 		return v, nil
-	case "G":
-		if len(v.items) > 0 {
-			v.cursor = len(v.items) - 1
-			v.skipToNextTask(-1)
-			v.ensureVisible()
-		}
+	case ActionNavBottom:
+		listJumpBottom(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
+		v.ensureVisible()
 		return v, nil
-	case "x", " ":
+	case ActionToggleDone:
 		item := v.selectedItem()
 		if item != nil && item.task != nil {
 			if item.completed {
@@ -258,6 +340,47 @@ func (v TodayView) handleKey(msg tea.KeyMsg) (TodayView, tea.Cmd) {
 			}
 			return v, v.repo.CloseTask(item.task.ID)
 		}
+	case ActionSetDue:
+		item := v.selectedItem()
+		if item != nil && item.task != nil {
+			v.mode = "due"
+			v.dueInput.Reset()
+			if item.task.Due != nil {
+				if item.task.Due.String != "" {
+					v.dueInput.SetValue(item.task.Due.String)
+				} else {
+					v.dueInput.SetValue(item.task.Due.Date)
+				}
+			}
+			v.dueInput.Focus()
+			return v, textinput.Blink
+		}
+	case ActionSetDeadline:
+		item := v.selectedItem()
+		if item != nil && item.task != nil {
+			v.mode = "deadline"
+			v.deadlineInput.Reset()
+			if item.task.Deadline != nil {
+				v.deadlineInput.SetValue(item.task.Deadline.Date)
+			}
+			v.deadlineInput.Focus()
+			return v, textinput.Blink
+		}
+	case ActionClearDates:
+		item := v.selectedItem()
+		if item == nil || item.task == nil {
+			return v, nil
+		}
+		if !isTaskOverdue(item.task) {
+			return v, func() tea.Msg {
+				return toastMsg{text: "Selected task is not overdue", isError: true}
+			}
+		}
+		empty := ""
+		return v, v.repo.UpdateTask(item.task.ID, updateTaskRequest{
+			DueString:     &empty,
+			ClearDeadline: true,
+		})
 	}
 
 	return v, nil
@@ -274,6 +397,8 @@ func (v TodayView) View() string {
 	}
 
 	var b strings.Builder
+	mutationStatus := v.repo.TaskMutationStatusMap()
+	assigneeNames := v.repo.GetAssigneeNameMap()
 
 	title := lipgloss.NewStyle().
 		Foreground(colorBright).
@@ -319,18 +444,23 @@ func (v TodayView) View() string {
 		task := item.task
 		selected := i == v.cursor && v.focused
 
-		line := v.renderTask(task, selected, inUpNext)
+		line := v.renderTask(task, selected, inUpNext, mutationStatus[task.ID], assigneeNames)
 		b.WriteString(line)
 		if i < end-1 {
 			b.WriteString("\n")
 		}
 	}
 
+	if v.mode != "" {
+		b.WriteString("\n\n")
+		b.WriteString(v.renderDialog())
+	}
+
 	return b.String()
 }
 
-func (v TodayView) renderTask(task *Task, selected bool, faded bool) string {
-	maxContentWidth := v.width - 30
+func (v TodayView) renderTask(task *Task, selected bool, faded bool, syncStatus MutationStatus, assigneeNames map[string]string) string {
+	maxContentWidth := v.width - 44
 	if maxContentWidth < 20 {
 		maxContentWidth = 20
 	}
@@ -357,8 +487,17 @@ func (v TodayView) renderTask(task *Task, selected bool, faded bool) string {
 				parts = append(parts, dueText)
 			}
 		}
+		if deadlineText := formatDeadline(task.Deadline); deadlineText != "" {
+			parts = append(parts, deadlineText)
+		}
 		if task.Priority > 0 && task.Priority < 4 {
 			parts = append(parts, priorityLabel(task.Priority))
+		}
+		if assignee := formatAssignee(task, assigneeNames); assignee != "" {
+			parts = append(parts, assignee)
+		}
+		if badge := mutationBadgePlain(syncStatus); badge != "" {
+			parts = append(parts, badge)
 		}
 		return lipgloss.NewStyle().
 			Background(colorBgHL).
@@ -409,6 +548,19 @@ func (v TodayView) renderTask(task *Task, selected bool, faded bool) string {
 		}
 	}
 
+	if deadlineText := formatDeadline(task.Deadline); deadlineText != "" {
+		if faded {
+			deadlineText = todayUpNextStyle.Render(deadlineText)
+		} else if isDeadlineOverdue(task.Deadline) {
+			deadlineText = dueOverdueStyle.Render(deadlineText)
+		} else if isDeadlineToday(task.Deadline) {
+			deadlineText = dueTodayStyle.Render(deadlineText)
+		} else {
+			deadlineText = deadlineStyle.Render(deadlineText)
+		}
+		parts = append(parts, deadlineText)
+	}
+
 	if task.Priority > 0 && task.Priority < 4 {
 		pl := priorityLabel(task.Priority)
 		if faded {
@@ -418,6 +570,18 @@ func (v TodayView) renderTask(task *Task, selected bool, faded bool) string {
 		}
 	}
 
+	if assignee := formatAssignee(task, assigneeNames); assignee != "" {
+		if faded {
+			parts = append(parts, todayUpNextStyle.Render(assignee))
+		} else {
+			parts = append(parts, assigneeStyle.Render(assignee))
+		}
+	}
+
+	if badge := mutationBadgeStyled(syncStatus); badge != "" {
+		parts = append(parts, badge)
+	}
+
 	return "  " + strings.Join(parts, "  ")
 }
 
@@ -425,6 +589,8 @@ func (v *TodayView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
 	v.searchInput.Width = 30
+	v.dueInput.Width = width - 8
+	v.deadlineInput.Width = width - 8
 }
 
 func (v *TodayView) SetFocused(focused bool) {
@@ -432,7 +598,44 @@ func (v *TodayView) SetFocused(focused bool) {
 }
 
 func (v TodayView) handlesInput() bool {
+	return v.searchMode || v.mode != ""
+}
+
+func (v TodayView) IsSearchMode() bool {
 	return v.searchMode
+}
+
+func (v TodayView) HasSearchQuery() bool {
+	return v.searchQuery != ""
+}
+
+func (v TodayView) renderDialog() string {
+	switch v.mode {
+	case "due":
+		return dialogStyle.Width(v.width - 4).Render(
+			dialogTitleStyle.Render("Set Due Date") + "\n" +
+				inputLabelStyle.Render("e.g. today, tomorrow, next monday, every friday (empty to clear)") + "\n" +
+				v.dueInput.View(),
+		)
+	case "deadline":
+		return dialogStyle.Width(v.width - 4).Render(
+			dialogTitleStyle.Render("Set Deadline") + "\n" +
+				inputLabelStyle.Render("YYYY-MM-DD (empty to clear)") + "\n" +
+				v.deadlineInput.View(),
+		)
+	default:
+		return ""
+	}
+}
+
+func todaySortDateKey(task Task) string {
+	if task.Due != nil && task.Due.Date != "" {
+		return task.Due.Date
+	}
+	if task.Deadline != nil {
+		return task.Deadline.Date
+	}
+	return ""
 }
 
 // SearchPanel returns the floating search panel content, or "" if inactive.
@@ -496,49 +699,19 @@ func (v TodayView) selectedItem() *displayItem {
 }
 
 func (v *TodayView) clampCursor() {
-	if v.cursor >= len(v.items) {
-		v.cursor = len(v.items) - 1
-	}
-	if v.cursor < 0 {
-		v.cursor = 0
-	}
-	if v.cursor < len(v.items) && v.items[v.cursor].isSection {
-		v.skipToNextTask(1)
-	}
+	listClampCursor(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TodayView) moveDown() {
-	if v.cursor < len(v.items)-1 {
-		v.cursor++
-		if v.cursor < len(v.items) && v.items[v.cursor].isSection {
-			if v.cursor < len(v.items)-1 {
-				v.cursor++
-			}
-		}
-	}
+	listMoveDown(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TodayView) moveUp() {
-	if v.cursor > 0 {
-		v.cursor--
-		if v.cursor >= 0 && v.items[v.cursor].isSection {
-			if v.cursor > 0 {
-				v.cursor--
-			}
-		}
-	}
+	listMoveUp(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TodayView) skipToNextTask(dir int) {
-	for v.cursor >= 0 && v.cursor < len(v.items) && v.items[v.cursor].isSection {
-		v.cursor += dir
-	}
-	if v.cursor < 0 {
-		v.cursor = 0
-	}
-	if v.cursor >= len(v.items) {
-		v.cursor = len(v.items) - 1
-	}
+	listSkip(&v.cursor, len(v.items), dir, func(idx int) bool { return v.items[idx].isSection })
 }
 
 func (v *TodayView) ensureVisible() {
@@ -546,10 +719,5 @@ func (v *TodayView) ensureVisible() {
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
-	if v.cursor < v.scrollOffset {
-		v.scrollOffset = v.cursor
-	}
-	if v.cursor >= v.scrollOffset+visibleHeight {
-		v.scrollOffset = v.cursor - visibleHeight + 1
-	}
+	listEnsureVisible(v.cursor, &v.scrollOffset, visibleHeight)
 }

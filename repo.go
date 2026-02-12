@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -72,6 +73,15 @@ func (r *Repository) GetProjectNameMap() map[string]string {
 	return m
 }
 
+// GetAssigneeNameMap returns cached assignee names keyed by user ID.
+func (r *Repository) GetAssigneeNameMap() map[string]string {
+	if r.store == nil {
+		return nil
+	}
+	names, _ := r.store.GetUserNames()
+	return names
+}
+
 // --- Two-phase reads ---
 
 // FetchProjects returns cached projects instantly if available (stale or not),
@@ -79,17 +89,28 @@ func (r *Repository) GetProjectNameMap() map[string]string {
 func (r *Repository) FetchProjects() tea.Cmd {
 	return func() tea.Msg {
 		if r.store != nil {
-			if !r.store.IsStale("projects", "") {
+			stale := r.store.IsStale("projects", "")
+			lastSynced, _ := r.store.LastSynced("projects", "")
+			if !stale {
 				projects, err := r.store.GetProjects()
 				if err == nil {
-					return projectsMsg{projects: projects}
+					return projectsMsg{
+						projects:   projects,
+						fromCache:  true,
+						stale:      false,
+						lastSynced: lastSynced,
+					}
 				}
 			}
 
 			// Stale but has data — return cached, view will trigger RefreshProjects
 			projects, err := r.store.GetProjects()
 			if err == nil && len(projects) > 0 {
-				return cachedProjectsMsg{projects: projects}
+				return cachedProjectsMsg{
+					projects:   projects,
+					stale:      true,
+					lastSynced: lastSynced,
+				}
 			}
 		}
 
@@ -113,23 +134,37 @@ func (r *Repository) fetchProjectsFromAPI() projectsMsg {
 	if r.store != nil {
 		_ = r.store.ReplaceProjects(projects)
 	}
-	return projectsMsg{projects: projects}
+	now := time.Now()
+	return projectsMsg{projects: projects, fromCache: false, stale: false, lastSynced: &now}
 }
 
 // FetchTasks returns cached tasks instantly if available, then triggers refresh.
 func (r *Repository) FetchTasks(projectID string) tea.Cmd {
 	return func() tea.Msg {
 		if r.store != nil {
-			if !r.store.IsStale("tasks", projectID) {
+			stale := r.store.IsStale("tasks", projectID)
+			lastSynced, _ := r.store.LastSynced("tasks", projectID)
+			if !stale {
 				tasks, err := r.store.GetTasks(projectID)
 				if err == nil {
-					return tasksMsg{projectID: projectID, tasks: tasks}
+					return tasksMsg{
+						projectID:  projectID,
+						tasks:      tasks,
+						fromCache:  true,
+						stale:      false,
+						lastSynced: lastSynced,
+					}
 				}
 			}
 
 			tasks, err := r.store.GetTasks(projectID)
 			if err == nil && len(tasks) > 0 {
-				return cachedTasksMsg{projectID: projectID, tasks: tasks}
+				return cachedTasksMsg{
+					projectID:  projectID,
+					tasks:      tasks,
+					stale:      true,
+					lastSynced: lastSynced,
+				}
 			}
 		}
 
@@ -152,23 +187,37 @@ func (r *Repository) fetchTasksFromAPI(projectID string) tasksMsg {
 	if r.store != nil {
 		_ = r.store.ReplaceTasks(projectID, tasks)
 	}
-	return tasksMsg{projectID: projectID, tasks: tasks}
+	now := time.Now()
+	return tasksMsg{projectID: projectID, tasks: tasks, fromCache: false, stale: false, lastSynced: &now}
 }
 
 // FetchSections returns cached sections instantly if available.
 func (r *Repository) FetchSections(projectID string) tea.Cmd {
 	return func() tea.Msg {
 		if r.store != nil {
-			if !r.store.IsStale("sections", projectID) {
+			stale := r.store.IsStale("sections", projectID)
+			lastSynced, _ := r.store.LastSynced("sections", projectID)
+			if !stale {
 				sections, err := r.store.GetSections(projectID)
 				if err == nil {
-					return sectionsMsg{projectID: projectID, sections: sections}
+					return sectionsMsg{
+						projectID:  projectID,
+						sections:   sections,
+						fromCache:  true,
+						stale:      false,
+						lastSynced: lastSynced,
+					}
 				}
 			}
 
 			sections, err := r.store.GetSections(projectID)
 			if err == nil && len(sections) > 0 {
-				return cachedSectionsMsg{projectID: projectID, sections: sections}
+				return cachedSectionsMsg{
+					projectID:  projectID,
+					sections:   sections,
+					stale:      true,
+					lastSynced: lastSynced,
+				}
 			}
 		}
 
@@ -191,7 +240,8 @@ func (r *Repository) fetchSectionsFromAPI(projectID string) sectionsMsg {
 	if r.store != nil {
 		_ = r.store.ReplaceSections(projectID, sections)
 	}
-	return sectionsMsg{projectID: projectID, sections: sections}
+	now := time.Now()
+	return sectionsMsg{projectID: projectID, sections: sections, fromCache: false, stale: false, lastSynced: &now}
 }
 
 // --- Optimistic mutations ---
@@ -229,6 +279,7 @@ func (r *Repository) ReopenTask(task Task) tea.Cmd {
 		if IsPendingID(task.ID) {
 			return toastMsg{text: "Task is still syncing, please wait", isError: true}
 		}
+		snapshotBlob, _ := json.Marshal(task)
 		if r.store != nil {
 			_ = r.store.UpsertTask(task)
 			_ = r.store.DeleteCompletedTask(task.ID)
@@ -236,6 +287,7 @@ func (r *Repository) ReopenTask(task Task) tea.Cmd {
 				EntityType: "task",
 				EntityID:   task.ID,
 				Action:     MutationReopen,
+				Snapshot:   string(snapshotBlob),
 				Status:     MutationPending,
 				CreatedAt:  time.Now(),
 			})
@@ -281,6 +333,9 @@ func (r *Repository) CreateTask(req createTaskRequest) tea.Cmd {
 		if req.DueString != "" {
 			tempTask.Due = &Due{String: req.DueString}
 		}
+		if req.DeadlineDate != "" {
+			tempTask.Deadline = &Deadline{Date: req.DeadlineDate}
+		}
 		if r.store != nil {
 			_ = r.store.UpsertTask(tempTask)
 			payload, _ := json.Marshal(req)
@@ -321,11 +376,50 @@ func (r *Repository) UpdateTask(taskID string, req updateTaskRequest) tea.Cmd {
 	}
 }
 
-// QuickAdd creates a task via natural language, no cache update (unpredictable project).
-func (r *Repository) QuickAdd(text string) tea.Cmd {
+type quickAddMutationPayload struct {
+	Text      string `json:"text"`
+	TempID    string `json:"temp_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+}
+
+// QuickAdd creates a task via natural language and optimistically inserts a temp task when project context is known.
+func (r *Repository) QuickAdd(text string, defaultProjectID string) tea.Cmd {
 	return func() tea.Msg {
-		err := r.client.QuickAdd(context.Background(), text)
-		return quickAddMsg{err: err}
+		trimmed := strings.TrimSpace(text)
+		if trimmed == "" {
+			return quickAddMsg{err: nil}
+		}
+
+		if r.store == nil {
+			_, err := r.client.QuickAdd(context.Background(), trimmed)
+			return quickAddMsg{err: err, projectID: defaultProjectID}
+		}
+
+		payload := quickAddMutationPayload{Text: trimmed, ProjectID: defaultProjectID}
+		var tempTask *Task
+		if defaultProjectID != "" {
+			temp := Task{
+				ID:        NewPendingID(),
+				Content:   trimmed,
+				ProjectID: defaultProjectID,
+				Priority:  4,
+			}
+			_ = r.store.UpsertTask(temp)
+			payload.TempID = temp.ID
+			tempTask = &temp
+		}
+
+		body, _ := json.Marshal(payload)
+		_, _ = r.store.EnqueueMutation(Mutation{
+			EntityType: "task",
+			EntityID:   payload.TempID,
+			Action:     MutationQuickAdd,
+			Payload:    string(body),
+			Status:     MutationPending,
+			CreatedAt:  time.Now(),
+		})
+
+		return quickAddMsg{err: nil, task: tempTask, projectID: defaultProjectID}
 	}
 }
 
@@ -364,6 +458,8 @@ func (r *Repository) FlushNext() tea.Cmd {
 		switch m.Action {
 		case MutationCreate:
 			return r.flushCreate(*m)
+		case MutationQuickAdd:
+			return r.flushQuickAdd(*m)
 		case MutationUpdate:
 			return r.flushUpdate(*m)
 		case MutationClose:
@@ -386,6 +482,10 @@ func (r *Repository) flushCreate(m Mutation) tea.Msg {
 
 	task, err := r.client.CreateTask(context.Background(), req)
 	if err != nil {
+		if isRetriableMutationError(err) {
+			_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+			return mutationFlushedMsg{mutation: m, err: err}
+		}
 		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "API error: "+err.Error())
 		return mutationConflictMsg{mutation: m, conflict: err.Error()}
 	}
@@ -394,6 +494,38 @@ func (r *Repository) flushCreate(m Mutation) tea.Msg {
 	if r.store != nil {
 		_ = r.store.DeleteTask(m.EntityID) // remove temp
 		_ = r.store.UpsertTask(task)       // insert real
+	}
+	_ = r.store.DeleteMutation(m.ID)
+	return mutationFlushedMsg{mutation: m, err: nil}
+}
+
+func (r *Repository) flushQuickAdd(m Mutation) tea.Msg {
+	var payload quickAddMutationPayload
+	if err := json.Unmarshal([]byte(m.Payload), &payload); err != nil {
+		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "invalid payload: "+err.Error())
+		return mutationConflictMsg{mutation: m, conflict: "invalid payload"}
+	}
+
+	task, err := r.client.QuickAdd(context.Background(), payload.Text)
+	if err != nil {
+		if isRetriableMutationError(err) {
+			_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+			return mutationFlushedMsg{mutation: m, err: err}
+		}
+		// For quick add, promote to conflict so the user gets explicit visibility and can retry/dismiss.
+		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "API error: "+err.Error())
+		// Remove temp placeholder if we inserted one.
+		if payload.TempID != "" && r.store != nil {
+			_ = r.store.DeleteTask(payload.TempID)
+		}
+		return mutationConflictMsg{mutation: m, conflict: err.Error()}
+	}
+
+	if r.store != nil {
+		if payload.TempID != "" {
+			_ = r.store.DeleteTask(payload.TempID)
+		}
+		_ = r.store.UpsertTask(task)
 	}
 	_ = r.store.DeleteMutation(m.ID)
 	return mutationFlushedMsg{mutation: m, err: nil}
@@ -413,9 +545,12 @@ func (r *Repository) flushUpdate(m Mutation) tea.Msg {
 			_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "task deleted on server")
 			return mutationConflictMsg{mutation: m, conflict: "task deleted on server"}
 		}
-		// Network error — revert to pending for retry
-		_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
-		return mutationFlushedMsg{mutation: m, err: err}
+		if isRetriableMutationError(err) {
+			_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+			return mutationFlushedMsg{mutation: m, err: err}
+		}
+		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "API error: "+err.Error())
+		return mutationConflictMsg{mutation: m, conflict: err.Error()}
 	}
 
 	// Snapshot-based conflict detection
@@ -432,8 +567,13 @@ func (r *Repository) flushUpdate(m Mutation) tea.Msg {
 	// No conflict — apply update
 	task, err := r.client.UpdateTask(context.Background(), m.EntityID, req)
 	if err != nil {
-		_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
-		return mutationFlushedMsg{mutation: m, err: err}
+		if isRetriableMutationError(err) {
+			_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+			return mutationFlushedMsg{mutation: m, err: err}
+		}
+		_ = r.restoreTaskFromSnapshot(m)
+		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "API error: "+err.Error())
+		return mutationConflictMsg{mutation: m, conflict: err.Error()}
 	}
 
 	if r.store != nil {
@@ -451,9 +591,14 @@ func (r *Repository) flushClose(m Mutation) tea.Msg {
 			_ = r.store.DeleteMutation(m.ID)
 			return mutationFlushedMsg{mutation: m, err: nil}
 		}
-		// Network error — revert to pending
-		_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
-		return mutationFlushedMsg{mutation: m, err: err}
+		if isRetriableMutationError(err) {
+			_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+			return mutationFlushedMsg{mutation: m, err: err}
+		}
+		// Close is user-visible state. Roll back and mark conflicted so it is explicit.
+		_ = r.restoreTaskFromSnapshot(m)
+		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "API error: "+err.Error())
+		return mutationConflictMsg{mutation: m, conflict: err.Error()}
 	}
 	_ = r.store.DeleteMutation(m.ID)
 	return mutationFlushedMsg{mutation: m, err: nil}
@@ -466,8 +611,13 @@ func (r *Repository) flushDelete(m Mutation) tea.Msg {
 			_ = r.store.DeleteMutation(m.ID)
 			return mutationFlushedMsg{mutation: m, err: nil}
 		}
-		_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
-		return mutationFlushedMsg{mutation: m, err: err}
+		if isRetriableMutationError(err) {
+			_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+			return mutationFlushedMsg{mutation: m, err: err}
+		}
+		_ = r.restoreTaskFromSnapshot(m)
+		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "API error: "+err.Error())
+		return mutationConflictMsg{mutation: m, conflict: err.Error()}
 	}
 	_ = r.store.DeleteMutation(m.ID)
 	return mutationFlushedMsg{mutation: m, err: nil}
@@ -480,8 +630,13 @@ func (r *Repository) flushReopen(m Mutation) tea.Msg {
 			_ = r.store.DeleteMutation(m.ID)
 			return mutationFlushedMsg{mutation: m, err: nil}
 		}
-		_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
-		return mutationFlushedMsg{mutation: m, err: err}
+		if isRetriableMutationError(err) {
+			_ = r.store.UpdateMutationStatus(m.ID, MutationPending, "")
+			return mutationFlushedMsg{mutation: m, err: err}
+		}
+		_ = r.rollbackReopen(m)
+		_ = r.store.UpdateMutationStatus(m.ID, MutationConflicted, "API error: "+err.Error())
+		return mutationConflictMsg{mutation: m, conflict: err.Error()}
 	}
 	_ = r.store.DeleteMutation(m.ID)
 	return mutationFlushedMsg{mutation: m, err: nil}
@@ -499,6 +654,37 @@ func (r *Repository) snapshotTask(taskID string) string {
 	}
 	blob, _ := json.Marshal(task)
 	return string(blob)
+}
+
+func (r *Repository) restoreTaskFromSnapshot(m Mutation) error {
+	if r.store == nil || m.Snapshot == "" {
+		return nil
+	}
+	var t Task
+	if err := json.Unmarshal([]byte(m.Snapshot), &t); err != nil {
+		return err
+	}
+	_ = r.store.DeleteCompletedTask(t.ID)
+	return r.store.UpsertTask(t)
+}
+
+func (r *Repository) rollbackReopen(m Mutation) error {
+	if r.store == nil {
+		return nil
+	}
+	// Remove from active list if present.
+	_ = r.store.DeleteTask(m.EntityID)
+
+	// Try to restore completed row from snapshot when available.
+	if m.Snapshot == "" {
+		return nil
+	}
+	var t Task
+	if err := json.Unmarshal([]byte(m.Snapshot), &t); err != nil {
+		return err
+	}
+	projectName := r.projectNameForID(t.ProjectID)
+	return r.store.SaveCompletedTask(t, projectName)
 }
 
 func (r *Repository) applyUpdateToCache(taskID string, req updateTaskRequest) Task {
@@ -523,6 +709,15 @@ func (r *Repository) applyUpdateToCache(taskID string, req updateTaskRequest) Ta
 			task.Due = nil
 		} else {
 			task.Due = &Due{String: *req.DueString}
+		}
+	}
+	if req.ClearDeadline {
+		task.Deadline = nil
+	} else if req.DeadlineDate != nil {
+		if *req.DeadlineDate == "" {
+			task.Deadline = nil
+		} else {
+			task.Deadline = &Deadline{Date: *req.DeadlineDate}
 		}
 	}
 	if req.Labels != nil {
@@ -568,6 +763,27 @@ func (r *Repository) detectConflict(snapshot, server Task, req updateTaskRequest
 				snapshotDue, *req.DueString, serverDue))
 		}
 	}
+	if req.ClearDeadline || req.DeadlineDate != nil {
+		snapshotDeadline := ""
+		serverDeadline := ""
+		targetDeadline := ""
+		if snapshot.Deadline != nil {
+			snapshotDeadline = snapshot.Deadline.Date
+		}
+		if server.Deadline != nil {
+			serverDeadline = server.Deadline.Date
+		}
+		if req.ClearDeadline {
+			targetDeadline = "<clear>"
+		} else if req.DeadlineDate != nil {
+			targetDeadline = *req.DeadlineDate
+		}
+		if snapshotDeadline != serverDeadline {
+			conflicts = append(conflicts, fmt.Sprintf(
+				"deadline: you changed %q→%q, server has %q",
+				snapshotDeadline, targetDeadline, serverDeadline))
+		}
+	}
 	if req.Labels != nil {
 		snapshotLabels := strings.Join(snapshot.Labels, ",")
 		serverLabels := strings.Join(server.Labels, ",")
@@ -595,13 +811,70 @@ func (r *Repository) GetAllMutations() []Mutation {
 	return mutations
 }
 
+// TaskMutationStatusMap returns the strongest mutation status for each task entity ID.
+func (r *Repository) TaskMutationStatusMap() map[string]MutationStatus {
+	out := make(map[string]MutationStatus)
+	if r.store == nil {
+		return out
+	}
+	mutations, err := r.store.GetAllMutations()
+	if err != nil {
+		return out
+	}
+	weight := func(s MutationStatus) int {
+		switch s {
+		case MutationConflicted:
+			return 3
+		case MutationFlushing:
+			return 2
+		case MutationPending:
+			return 1
+		default:
+			return 0
+		}
+	}
+	for _, m := range mutations {
+		if m.EntityType != "task" || m.EntityID == "" {
+			continue
+		}
+		prev, ok := out[m.EntityID]
+		if !ok || weight(m.Status) >= weight(prev) {
+			out[m.EntityID] = m.Status
+		}
+	}
+	return out
+}
+
 func (r *Repository) RetryMutation(id int64) tea.Cmd {
 	return func() tea.Msg {
 		if r.store == nil {
 			return noopMsg{}
 		}
+		if muts, err := r.store.GetAllMutations(); err == nil {
+			for _, m := range muts {
+				if m.ID != id {
+					continue
+				}
+				switch m.Action {
+				case MutationClose:
+					_ = r.restoreTaskFromSnapshot(m)
+				case MutationReopen:
+					_ = r.rollbackReopen(m)
+				}
+				break
+			}
+		}
 		_ = r.store.UpdateMutationStatus(id, MutationPending, "")
 		return flushNextMsg{}
+	}
+}
+
+func (r *Repository) restoreForDismiss(m Mutation) {
+	switch m.Action {
+	case MutationClose:
+		_ = r.restoreTaskFromSnapshot(m)
+	case MutationReopen:
+		_ = r.rollbackReopen(m)
 	}
 }
 
@@ -610,7 +883,50 @@ func (r *Repository) DismissMutation(id int64) tea.Cmd {
 		if r.store == nil {
 			return noopMsg{}
 		}
+		if muts, err := r.store.GetAllMutations(); err == nil {
+			for _, m := range muts {
+				if m.ID != id {
+					continue
+				}
+				r.restoreForDismiss(m)
+				break
+			}
+		}
 		_ = r.store.DeleteMutation(id)
+		return mutationEnqueuedMsg{count: r.store.PendingCount()}
+	}
+}
+
+func (r *Repository) DismissConflictedMutations() tea.Cmd {
+	return func() tea.Msg {
+		if r.store == nil {
+			return noopMsg{}
+		}
+		muts, err := r.store.GetConflictedMutations()
+		if err != nil {
+			return noopMsg{}
+		}
+		for _, m := range muts {
+			r.restoreForDismiss(m)
+			_ = r.store.DeleteMutation(m.ID)
+		}
+		return mutationEnqueuedMsg{count: r.store.PendingCount()}
+	}
+}
+
+func (r *Repository) DismissAllMutations() tea.Cmd {
+	return func() tea.Msg {
+		if r.store == nil {
+			return noopMsg{}
+		}
+		muts, err := r.store.GetAllMutations()
+		if err != nil {
+			return noopMsg{}
+		}
+		for _, m := range muts {
+			r.restoreForDismiss(m)
+			_ = r.store.DeleteMutation(m.ID)
+		}
 		return mutationEnqueuedMsg{count: r.store.PendingCount()}
 	}
 }
@@ -706,6 +1022,126 @@ func (r *Repository) projectNameForID(projectID string) string {
 		}
 	}
 	return ""
+}
+
+// RefreshAssigneeDirectory updates the local assignee name cache from Todoist user directories.
+func (r *Repository) RefreshAssigneeDirectory() tea.Cmd {
+	return func() tea.Msg {
+		if r.store == nil {
+			return assigneeDirectoryMsg{}
+		}
+
+		names, _ := r.store.GetUserNames()
+		if names == nil {
+			names = make(map[string]string)
+		}
+		updated := 0
+		var errs []string
+
+		if me, err := r.client.GetCurrentUserDirectoryEntry(context.Background()); err != nil {
+			errs = append(errs, "user lookup failed: "+err.Error())
+		} else if me != nil && me.ID != "" && me.Name != "" {
+			if names[me.ID] != me.Name {
+				updated++
+			}
+			names[me.ID] = me.Name
+		}
+
+		workspaceLookupOK := false
+		if users, err := r.client.GetWorkspaceUsers(context.Background()); err != nil {
+			errs = append(errs, "workspace users lookup failed: "+err.Error())
+		} else {
+			workspaceLookupOK = true
+			for _, u := range users {
+				if u.ID == "" || u.Name == "" {
+					continue
+				}
+				if names[u.ID] != u.Name {
+					updated++
+				}
+				names[u.ID] = u.Name
+			}
+		}
+
+		unresolved := r.unresolvedAssigneeIDs(names)
+		if len(unresolved) > 0 {
+			for _, projectID := range r.projectsWithAssignees(unresolved) {
+				users, err := r.client.GetProjectCollaborators(context.Background(), projectID)
+				if err != nil {
+					// Avoid noisy errors when workspace lookup already succeeded.
+					if !workspaceLookupOK {
+						errs = append(errs, "project collaborators lookup failed: "+err.Error())
+					}
+					continue
+				}
+				for _, u := range users {
+					if u.ID == "" || u.Name == "" {
+						continue
+					}
+					if names[u.ID] != u.Name {
+						updated++
+					}
+					names[u.ID] = u.Name
+				}
+			}
+		}
+
+		if err := r.store.UpsertUserNames(names); err != nil {
+			return assigneeDirectoryMsg{err: err}
+		}
+
+		var err error
+		if len(errs) > 0 && updated == 0 {
+			err = errors.New(strings.Join(errs, "; "))
+		}
+		return assigneeDirectoryMsg{updated: updated, err: err}
+	}
+}
+
+func (r *Repository) unresolvedAssigneeIDs(names map[string]string) map[string]bool {
+	out := make(map[string]bool)
+	if r.store == nil {
+		return out
+	}
+	tasks, err := r.store.GetAllTasks()
+	if err != nil {
+		return out
+	}
+	for _, t := range tasks {
+		if t.ResponsibleUID == nil || *t.ResponsibleUID == "" {
+			continue
+		}
+		if _, ok := names[*t.ResponsibleUID]; ok {
+			continue
+		}
+		out[*t.ResponsibleUID] = true
+	}
+	return out
+}
+
+func (r *Repository) projectsWithAssignees(assigneeIDs map[string]bool) []string {
+	if r.store == nil || len(assigneeIDs) == 0 {
+		return nil
+	}
+	tasks, err := r.store.GetAllTasks()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, t := range tasks {
+		if t.ResponsibleUID == nil || *t.ResponsibleUID == "" {
+			continue
+		}
+		if !assigneeIDs[*t.ResponsibleUID] || t.ProjectID == "" {
+			continue
+		}
+		seen[t.ProjectID] = true
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	return out
 }
 
 // --- Background cache warming ---

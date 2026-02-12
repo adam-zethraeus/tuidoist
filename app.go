@@ -22,8 +22,8 @@ const sidebarWidth = 28
 
 // App is the root Bubbletea model
 type App struct {
-	repo  *Repository
-	focus focus
+	repo   *Repository
+	focus  focus
 	width  int
 	height int
 	ready  bool
@@ -44,27 +44,22 @@ type App struct {
 	toast      string
 	toastError bool
 
-	// Help overlay
-	showHelp bool
-
-	// Queue overlay
-	showQueue bool
-
-	// Completed overlay
-	showCompleted bool
-
-	// Triage overlay
-	showTriage bool
-
-	// Search overlay
-	showSearch bool
-	search     SearchView
+	// App mode / overlays
+	mode   appMode
+	search SearchView
 
 	// Track last selected project to detect changes
 	lastProjectID string
 
 	// Background refresh
 	bgRefreshStarted bool
+
+	// Cache/source feedback for header UX.
+	cacheHintActive   bool
+	cacheHintResource string
+	cacheHintLastSync *time.Time
+	cacheHintSyncing  bool
+	cacheHintError    string
 }
 
 func NewApp(repo *Repository) App {
@@ -84,6 +79,7 @@ func NewApp(repo *Repository) App {
 		search:    NewSearchView(repo),
 		loading:   true,
 		spinner:   s,
+		mode:      appModeMain,
 	}
 }
 
@@ -91,6 +87,7 @@ func (a App) Init() tea.Cmd {
 	return tea.Batch(
 		a.spinner.Tick,
 		a.projects.Init(),
+		a.repo.RefreshAssigneeDirectory(),
 		a.repo.FlushNext(),
 	)
 }
@@ -116,28 +113,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Ignore mouse if a dialog is active
-		if a.tasks.handlesInput() || a.projects.handlesInput() {
-			return a, nil
-		}
-
-		// Ignore mouse on help/search/triage overlays
-		if a.showHelp || a.showSearch || a.showTriage {
-			return a, nil
-		}
-
-		// Queue overlay
-		if a.showQueue {
+		switch a.mode {
+		case appModeQueue:
 			var cmd tea.Cmd
 			a.queue, cmd = a.queue.Update(msg)
 			return a, cmd
-		}
-
-		// Completed overlay
-		if a.showCompleted {
+		case appModeCompleted:
 			var cmd tea.Cmd
 			a.completed, cmd = a.completed.Update(msg)
 			return a, cmd
+		case appModeHelp, appModeSearch, appModeTriage:
+			return a, nil
+		}
+
+		// Ignore mouse if a dialog or search is active
+		if a.tasks.handlesInput() || a.projects.handlesInput() || a.today.handlesInput() {
+			return a, nil
 		}
 
 		// Ignore clicks on header and footer
@@ -187,58 +178,58 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
-		// Always handle quit
 		if msg.String() == "ctrl+c" {
 			return a, tea.Quit
 		}
 
-		// Search overlay handles its own input
-		if a.showSearch {
+		ctx := a.currentInputContext()
+		action := ResolveAction(ctx, msg.String())
+
+		if action == ActionQuit {
+			return a, tea.Quit
+		}
+
+		switch a.mode {
+		case appModeHelp:
+			if action == ActionToggleHelp || action == ActionCancel {
+				a.mode = appModeMain
+			}
+			return a, nil
+
+		case appModeSearch:
 			var cmd tea.Cmd
 			a.search, cmd = a.search.Update(msg)
 			if !a.search.IsActive() {
-				a.showSearch = false
+				a.mode = appModeMain
 			}
 			return a, cmd
-		}
 
-		// Queue overlay handles its own input
-		if a.showQueue {
-			switch msg.String() {
-			case "Q", "esc":
-				a.showQueue = false
+		case appModeQueue:
+			if action == ActionCancel {
+				a.mode = appModeMain
 				return a, nil
-			default:
-				var cmd tea.Cmd
-				a.queue, cmd = a.queue.Update(msg)
-				return a, cmd
 			}
-		}
+			var cmd tea.Cmd
+			a.queue, cmd = a.queue.Update(msg)
+			return a, cmd
 
-		// Completed overlay handles its own input
-		if a.showCompleted {
-			switch msg.String() {
-			case "C", "esc":
-				a.showCompleted = false
+		case appModeCompleted:
+			if action == ActionCancel {
+				a.mode = appModeMain
 				return a, nil
-			default:
-				var cmd tea.Cmd
-				a.completed, cmd = a.completed.Update(msg)
-				return a, cmd
 			}
-		}
+			var cmd tea.Cmd
+			a.completed, cmd = a.completed.Update(msg)
+			return a, cmd
 
-		// Triage overlay handles its own input
-		if a.showTriage {
+		case appModeTriage:
 			if !a.triage.handlesInput() {
-				switch msg.String() {
-				case "T", "esc":
-					a.showTriage = false
-					// Refresh active view since triage may have changed tasks
+				if action == ActionCancel {
+					a.mode = appModeMain
 					if a.isTodayActive() {
 						a.today.Refresh()
-					} else if a.tasks.projectID != "" {
-						cmds = append(cmds, a.repo.RefreshTasks(a.tasks.projectID))
+					} else if a.tasks.CurrentProjectID() != "" {
+						cmds = append(cmds, a.repo.RefreshTasks(a.tasks.CurrentProjectID()))
 					}
 					return a, tea.Batch(cmds...)
 				}
@@ -248,7 +239,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
-		// Don't handle global keys if a dialog or search is open
+		// Main mode: block global actions while local text/dialog inputs are active.
 		if a.isTodayActive() && a.today.handlesInput() {
 			var cmd tea.Cmd
 			a.today, cmd = a.today.Update(msg)
@@ -267,31 +258,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
-		switch msg.String() {
-		case "q":
-			return a, tea.Quit
-		case "Q":
-			a.showQueue = true
+		switch action {
+		case ActionOpenQueue:
+			a.mode = appModeQueue
 			a.queue.Refresh()
 			return a, nil
-		case "ctrl+p", "alt+p":
-			a.showSearch = true
+		case ActionOpenSearch:
+			a.mode = appModeSearch
 			a.search.Open()
 			return a, textinput.Blink
-		case "?":
-			a.showHelp = !a.showHelp
+		case ActionToggleHelp:
+			a.mode = appModeHelp
 			return a, nil
-		case "C":
-			a.showCompleted = true
+		case ActionOpenCompleted:
+			a.mode = appModeCompleted
 			a.completed.SetSize(a.height)
 			a.completed.Refresh()
 			return a, nil
-		case "T":
-			a.showTriage = true
+		case ActionOpenTriage:
+			a.mode = appModeTriage
 			a.triage.SetSize(a.width, a.height)
 			a.triage.Open()
 			return a, nil
-		case "tab":
+		case ActionToggleFocus:
 			if a.focus == focusSidebar {
 				a.focus = focusTasks
 			} else {
@@ -306,37 +295,37 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.today.SetFocused(false)
 			}
 			return a, nil
-		case "n":
+		case ActionNewTask:
 			// If a view has active search results, let n/N navigate matches instead
-			if a.isTodayActive() && a.today.searchQuery != "" {
-				break // fall through to view delegation
+			if a.focus == focusTasks && a.isTodayActive() && a.today.HasSearchQuery() {
+				break
 			}
-			if !a.isTodayActive() && a.tasks.searchQuery != "" {
-				break // fall through to view delegation
+			if a.focus == focusTasks && !a.isTodayActive() && a.tasks.HasSearchQuery() {
+				break
 			}
-			// Quick add — open dialog on the tasks view
-			a.tasks.mode = "quick-add"
-			a.tasks.quickInput.Reset()
-			a.tasks.quickInput.Focus()
-			// Clear project context on Today so quick-add doesn't default to a stale project
+			defaultProject := a.tasks.CurrentProjectName()
 			if a.isTodayActive() {
-				a.tasks.quickAddProject = ""
-			} else {
-				a.tasks.quickAddProject = a.tasks.projectName
+				defaultProject = ""
 			}
-			return a, textinput.Blink
-		case "r":
+			var cmd tea.Cmd
+			a.tasks, cmd = a.tasks.OpenQuickAdd(defaultProject)
+			return a, cmd
+		case ActionRefresh:
 			// Refresh — force API fetch
 			a.loading = true
 			if a.isTodayActive() {
-				return a, a.repo.RefreshProjects()
+				return a, tea.Batch(
+					a.repo.RefreshProjects(),
+					a.repo.RefreshAssigneeDirectory(),
+				)
 			}
 			return a, tea.Batch(
 				a.repo.RefreshProjects(),
-				a.repo.RefreshTasks(a.tasks.projectID),
-				a.repo.RefreshSections(a.tasks.projectID),
+				a.repo.RefreshTasks(a.tasks.CurrentProjectID()),
+				a.repo.RefreshSections(a.tasks.CurrentProjectID()),
+				a.repo.RefreshAssigneeDirectory(),
 			)
-		case "enter":
+		case ActionFocusTasks:
 			if a.focus == focusSidebar {
 				// Just switch focus — project already loaded on cursor move
 				a.focus = focusTasks
@@ -354,6 +343,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cachedProjectsMsg:
 		a.loading = true
+		a.setCacheHint("projects", msg.lastSynced, true, nil)
 		var cmd tea.Cmd
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
@@ -382,6 +372,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectsMsg:
 		a.loading = false
+		if msg.err != nil {
+			a.setCacheHint("projects", msg.lastSynced, false, msg.err)
+		} else if msg.fromCache {
+			a.setCacheHint("projects", msg.lastSynced, false, nil)
+		} else if a.cacheHintResource == "projects" {
+			a.clearCacheHint()
+		}
 		var cmd tea.Cmd
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
@@ -415,24 +412,53 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case cachedTasksMsg:
-		var cmd tea.Cmd
-		a.tasks, cmd = a.tasks.Update(msg)
-		return a, cmd
-
-	case cachedSectionsMsg:
-		var cmd tea.Cmd
-		a.tasks, cmd = a.tasks.Update(msg)
-		return a, cmd
-
-	case tasksMsg:
-		if msg.projectID == a.tasks.projectID {
-			a.loading = false
+		if msg.projectID == a.tasks.CurrentProjectID() {
+			a.loading = true
+			a.setCacheHint("tasks", msg.lastSynced, true, nil)
 		}
 		var cmd tea.Cmd
 		a.tasks, cmd = a.tasks.Update(msg)
 		return a, cmd
 
+	case cachedSectionsMsg:
+		if msg.projectID == a.tasks.CurrentProjectID() {
+			a.loading = true
+			if !a.cacheHintActive || a.cacheHintResource != "tasks" {
+				a.setCacheHint("sections", msg.lastSynced, true, nil)
+			}
+		}
+		var cmd tea.Cmd
+		a.tasks, cmd = a.tasks.Update(msg)
+		return a, cmd
+
+	case tasksMsg:
+		if msg.projectID == a.tasks.CurrentProjectID() {
+			a.loading = false
+			if msg.err != nil {
+				a.setCacheHint("tasks", msg.lastSynced, false, msg.err)
+			} else if msg.fromCache {
+				a.setCacheHint("tasks", msg.lastSynced, false, nil)
+			} else if a.cacheHintResource == "tasks" || a.cacheHintResource == "sections" {
+				a.clearCacheHint()
+			}
+		}
+		var cmd tea.Cmd
+		a.tasks, cmd = a.tasks.Update(msg)
+		if msg.err == nil {
+			return a, tea.Batch(cmd, a.repo.RefreshAssigneeDirectory())
+		}
+		return a, cmd
+
 	case sectionsMsg:
+		if msg.projectID == a.tasks.CurrentProjectID() {
+			if msg.err != nil {
+				a.setCacheHint("sections", msg.lastSynced, false, msg.err)
+			} else if msg.fromCache {
+				a.setCacheHint("sections", msg.lastSynced, false, nil)
+			} else if a.cacheHintResource == "sections" {
+				a.clearCacheHint()
+			}
+		}
 		var cmd tea.Cmd
 		a.tasks, cmd = a.tasks.Update(msg)
 		return a, cmd
@@ -443,9 +469,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return toastMsg{text: "Sync failed: " + msg.err.Error(), isError: true}
 			})
 		}
-		// If a create was flushed, refresh task list to get the real ID
-		if msg.mutation.Action == MutationCreate && msg.err == nil {
-			cmds = append(cmds, a.repo.RefreshTasks(a.tasks.projectID))
+		// Replace optimistic placeholders and ensure lists reconcile to server IDs.
+		if msg.err == nil {
+			switch msg.mutation.Action {
+			case MutationCreate, MutationQuickAdd:
+				if pid := a.tasks.CurrentProjectID(); pid != "" {
+					cmds = append(cmds, a.repo.RefreshTasks(pid))
+				}
+				if a.isTodayActive() {
+					a.today.Refresh()
+				}
+			}
 		}
 		// Chain: flush next mutation
 		cmds = append(cmds, a.repo.FlushNext())
@@ -463,7 +497,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 		// Refresh completed view if open
-		if a.showCompleted {
+		if a.mode == appModeCompleted {
 			a.completed.Refresh()
 		}
 		cmds = append(cmds, a.repo.FlushNext())
@@ -479,7 +513,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.projects, cmd = a.projects.Update(msg)
 		cmds = append(cmds, cmd)
 		// If current project was archived, switch to first available
-		if msg.err == nil && msg.projectID == a.tasks.projectID {
+		if msg.err == nil && msg.projectID == a.tasks.CurrentProjectID() {
 			if p := a.projects.SelectedProject(); p != nil {
 				a.lastProjectID = p.ID
 				var taskCmd tea.Cmd
@@ -496,7 +530,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		// Refresh projects list and completed view
-		if a.showCompleted {
+		if a.mode == appModeCompleted {
 			a.completed.Refresh()
 		}
 		return a, tea.Batch(
@@ -508,6 +542,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, func() tea.Msg {
 			return toastMsg{text: "Sync conflict — press Q to review", isError: true}
 		})
+		// Refresh visible views to reflect any optimistic rollback applied in the repository.
+		if a.isTodayActive() {
+			a.today.Refresh()
+		} else if pid := a.tasks.CurrentProjectID(); pid != "" {
+			var cmd tea.Cmd
+			a.tasks, cmd = a.tasks.LoadProject(pid, a.tasks.CurrentProjectName())
+			cmds = append(cmds, cmd)
+		}
+		if a.mode == appModeCompleted {
+			a.completed.Refresh()
+		}
 		return a, tea.Batch(cmds...)
 
 	case mutationEnqueuedMsg:
@@ -546,6 +591,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case assigneeDirectoryMsg:
+		// No explicit state needed; views read names from the cache.
+		if msg.err != nil {
+			return a, func() tea.Msg {
+				return toastMsg{text: "Assignee lookup failed: " + msg.err.Error(), isError: true}
+			}
+		}
+		return a, nil
+
 	case toastMsg:
 		a.toast = msg.text
 		a.toastError = msg.isError
@@ -558,7 +612,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case navigateToTaskMsg:
-		a.showSearch = false
+		if a.mode == appModeSearch {
+			a.mode = appModeMain
+		}
 		// Navigate to the project containing the task
 		a.projects.SelectProjectByID(msg.projectID)
 		a.lastProjectID = msg.projectID
@@ -567,7 +623,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if p != nil {
 			projectName = p.Name
 		}
-		a.tasks.jumpToTaskID = msg.taskID
+		a.tasks.SetJumpToTask(msg.taskID)
 		var taskCmd tea.Cmd
 		a.tasks, taskCmd = a.tasks.LoadProject(msg.projectID, projectName)
 		// Switch focus to tasks
@@ -578,10 +634,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, taskCmd
 
 	case navigateToProjectMsg:
-		a.showSearch = false
+		if a.mode == appModeSearch {
+			a.mode = appModeMain
+		}
 		if msg.projectID == "" {
 			// Navigate to Today
-			a.projects.cursor = 0
+			a.projects.SelectToday()
 			a.lastProjectID = ""
 			a.today.Refresh()
 			a.focus = focusTasks
@@ -611,10 +669,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 	}
 
-	// Route blink/tick messages to search overlay when active
-	if a.showSearch {
+	// Route blink/tick messages to search overlay when active.
+	if a.mode == appModeSearch {
 		var cmd tea.Cmd
 		a.search, cmd = a.search.Update(msg)
+		if !a.search.IsActive() {
+			a.mode = appModeMain
+		}
 		return a, cmd
 	}
 
@@ -653,7 +714,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg.(type) {
 	case taskClosedMsg, taskDeletedMsg, taskCreatedMsg, taskUpdatedMsg, quickAddMsg:
 		// Route to triage if active
-		if a.showTriage {
+		if a.mode == appModeTriage {
 			var cmd tea.Cmd
 			a.triage, cmd = a.triage.Update(msg)
 			cmds = append(cmds, cmd)
@@ -693,23 +754,16 @@ func (a App) View() string {
 		return "Loading..."
 	}
 
-	if a.showHelp {
+	switch a.mode {
+	case appModeHelp:
 		return a.renderHelp()
-	}
-
-	if a.showSearch {
+	case appModeSearch:
 		return a.search.View(a.width, a.height)
-	}
-
-	if a.showQueue {
+	case appModeQueue:
 		return a.queue.View(a.width, a.height)
-	}
-
-	if a.showCompleted {
+	case appModeCompleted:
 		return a.completed.View(a.width, a.height)
-	}
-
-	if a.showTriage {
+	case appModeTriage:
 		return a.triage.View(a.width, a.height)
 	}
 
@@ -745,7 +799,7 @@ func (a App) View() string {
 	view = padLines(view, a.width)
 
 	// Overlay floating quick-add dialog
-	if a.tasks.mode == "quick-add" {
+	if a.tasks.IsQuickAddOpen() {
 		contentW := a.width - sidebarWidth - 5
 		if contentW < 40 {
 			contentW = 40
@@ -753,7 +807,7 @@ func (a App) View() string {
 		panel := dialogStyle.Width(contentW - 4).Render(
 			dialogTitleStyle.Render("Quick Add") + "\n" +
 				inputLabelStyle.Render("Supports: dates, #project, @label, p1-p4, //description") + "\n" +
-				a.tasks.quickInput.View(),
+				a.tasks.QuickAddInputView(),
 		)
 		fgLines := strings.Split(panel, "\n")
 		panelW := 0
@@ -796,6 +850,69 @@ func (a App) localSearchPanel() string {
 	return a.tasks.SearchPanel()
 }
 
+func (a *App) setCacheHint(resource string, lastSynced *time.Time, syncing bool, err error) {
+	a.cacheHintActive = true
+	a.cacheHintResource = resource
+	a.cacheHintLastSync = lastSynced
+	a.cacheHintSyncing = syncing
+	if err != nil {
+		a.cacheHintError = err.Error()
+	} else {
+		a.cacheHintError = ""
+	}
+}
+
+func (a *App) clearCacheHint() {
+	a.cacheHintActive = false
+	a.cacheHintResource = ""
+	a.cacheHintLastSync = nil
+	a.cacheHintSyncing = false
+	a.cacheHintError = ""
+}
+
+func (a App) currentInputContext() InputContext {
+	switch a.mode {
+	case appModeHelp:
+		return ContextHelp
+	case appModeSearch:
+		return ContextSearchOverlay
+	case appModeQueue:
+		return ContextQueueOverlay
+	case appModeCompleted:
+		return ContextCompletedOverlay
+	case appModeTriage:
+		if a.triage.handlesInput() {
+			return ContextTriageDialog
+		}
+		return ContextTriageOverlay
+	}
+
+	// Main mode
+	if a.projects.handlesInput() {
+		return ContextMainSidebarDialog
+	}
+	if a.tasks.handlesInput() {
+		if a.tasks.IsSearchMode() {
+			return ContextMainTasksSearch
+		}
+		return ContextMainTasksDialog
+	}
+	if a.today.handlesInput() {
+		if a.today.IsSearchMode() {
+			return ContextMainTodaySearch
+		}
+		return ContextMainTodayDialog
+	}
+
+	if a.focus == focusSidebar {
+		return ContextMainSidebar
+	}
+	if a.isTodayActive() {
+		return ContextMainToday
+	}
+	return ContextMainTasks
+}
+
 func (a App) renderHeader() string {
 	logo := headerStyle.Render("❏ Todoist")
 
@@ -819,6 +936,32 @@ func (a App) renderHeader() string {
 			right = toastErrorStyle.Render("✗ " + a.toast)
 		} else {
 			right = toastSuccessStyle.Render("✓ " + a.toast)
+		}
+	}
+
+	if a.cacheHintActive {
+		status := "cache"
+		if a.cacheHintLastSync != nil {
+			age := time.Since(*a.cacheHintLastSync)
+			if age < time.Minute {
+				status = "cached just now"
+			} else {
+				status = "cached " + formatAgeSince(*a.cacheHintLastSync) + " ago"
+			}
+		}
+		if a.cacheHintSyncing {
+			status += " · syncing"
+		} else {
+			status += " · ready"
+		}
+		if a.cacheHintError != "" {
+			status += " · sync failed"
+		}
+		cacheLine := lipgloss.NewStyle().Foreground(colorYellow).Render(status)
+		if right != "" {
+			right = cacheLine + "  " + right
+		} else {
+			right = cacheLine
 		}
 	}
 
@@ -846,86 +989,17 @@ func (a App) renderHeader() string {
 }
 
 func (a App) renderFooter() string {
-	var hints []string
-
-	if a.tasks.handlesInput() && !a.tasks.searchMode {
-		hints = append(hints,
-			keyHint("enter", "confirm"),
-			keyHint("esc", "cancel"),
-		)
-	} else if a.tasks.searchMode || (a.isTodayActive() && a.today.searchMode) {
-		hints = append(hints,
-			keyHint("enter", "search"),
-			keyHint("esc", "cancel"),
-		)
-	} else if a.focus == focusSidebar {
-		if a.projects.handlesInput() {
-			if a.projects.mode == "add" {
-				hints = append(hints,
-					keyHint("enter", "confirm"),
-					keyHint("esc", "cancel"),
-				)
-			} else {
-				hints = append(hints,
-					keyHint("y", "confirm"),
-					keyHint("n", "cancel"),
-				)
+	ctx := a.currentInputContext()
+	hints := HintsForContext(ctx)
+	if (ctx == ContextMainTasks && !a.tasks.HasSearchQuery()) || (ctx == ContextMainToday && !a.today.HasSearchQuery()) {
+		filtered := hints[:0]
+		for _, h := range hints {
+			if strings.Contains(h, "next/prev") {
+				continue
 			}
-		} else {
-			hints = append(hints,
-				keyHint("j/k", "nav"),
-				keyHint("enter/tab", "tasks"),
-				keyHint("n", "new task"),
-				keyHint("a", "add list"),
-				keyHint("d", "archive"),
-				keyHint("^P", "search"),
-				keyHint("T", "triage"),
-				keyHint("C", "completed"),
-				keyHint("?", "help"),
-				keyHint("q", "quit"),
-			)
+			filtered = append(filtered, h)
 		}
-	} else if a.isTodayActive() {
-		hints = append(hints,
-			keyHint("j/k", "nav"),
-			keyHint("x/space", "toggle"),
-			keyHint("n", "new"),
-			keyHint("/", "search"),
-		)
-		if a.today.searchQuery != "" {
-			hints = append(hints, keyHint("n/N", "next/prev"))
-		}
-		hints = append(hints,
-			keyHint("tab", "projects"),
-			keyHint("^P", "search all"),
-			keyHint("T", "triage"),
-			keyHint("C", "completed"),
-			keyHint("Q", "queue"),
-			keyHint("?", "help"),
-			keyHint("q", "quit"),
-		)
-	} else {
-		hints = append(hints,
-			keyHint("j/k", "nav"),
-			keyHint("x/space", "toggle"),
-			keyHint("n", "new"),
-			keyHint("e", "edit"),
-			keyHint("s", "due"),
-			keyHint("d", "del"),
-			keyHint("1-4", "prio"),
-			keyHint("/", "search"),
-		)
-		if a.tasks.searchQuery != "" {
-			hints = append(hints, keyHint("n/N", "next/prev"))
-		}
-		hints = append(hints,
-			keyHint("^P", "search all"),
-			keyHint("T", "triage"),
-			keyHint("C", "completed"),
-			keyHint("Q", "queue"),
-			keyHint("tab", "projects"),
-			keyHint("?", "help"),
-		)
+		hints = filtered
 	}
 
 	return lipgloss.NewStyle().
@@ -936,47 +1010,7 @@ func (a App) renderFooter() string {
 }
 
 func (a App) renderHelp() string {
-	helpItems := []struct{ key, desc string }{
-		{"Navigation", ""},
-		{"j / ↓", "Move down"},
-		{"k / ↑", "Move up"},
-		{"g", "Go to top"},
-		{"G", "Go to bottom"},
-		{"tab / enter", "Switch sidebar / tasks"},
-		{"", ""},
-		{"Tasks", ""},
-		{"x / space", "Toggle done (complete/reopen)"},
-		{"n", "New task (quick add)"},
-		{"e", "Edit task content"},
-		{"s", "Set due date"},
-		{"d", "Delete task"},
-		{"1-4", "Set priority (1=highest)"},
-		{"", ""},
-		{"Projects", ""},
-		{"a", "Add new list"},
-		{"d", "Archive list"},
-		{"", ""},
-		{"Search", ""},
-		{"ctrl+p", "Global search (tasks + projects)"},
-		{"alt+enter", "Create task from search text"},
-		{"/", "Search in current view"},
-		{"n / N", "Next / previous match"},
-		{"esc", "Clear search"},
-		{"", ""},
-		{"Triage", ""},
-		{"T", "Eisenhower matrix triage"},
-		{"1-3", "Assign quadrant (in triage)"},
-		{"0", "Clear priority (in triage)"},
-		{"l", "Set labels (in triage)"},
-		{"enter", "Skip / mark reviewed (in triage)"},
-		{"", ""},
-		{"General", ""},
-		{"r", "Refresh"},
-		{"C", "Recently completed"},
-		{"Q", "Sync queue"},
-		{"?", "Toggle help"},
-		{"q / ctrl+c", "Quit"},
-	}
+	helpItems := HelpItemsFromKeymap()
 
 	var b strings.Builder
 	b.WriteString(lipgloss.NewStyle().
@@ -1011,6 +1045,23 @@ func (a App) renderHelp() string {
 		Width(a.width).
 		Height(a.height).
 		Render(b.String())
+}
+
+func formatAgeSince(ts time.Time) string {
+	d := time.Since(ts)
+	if d < time.Minute {
+		return "0m"
+	}
+	mins := int(d.Minutes())
+	if mins < 60 {
+		return fmt.Sprintf("%dm", mins)
+	}
+	hours := mins / 60
+	remMins := mins % 60
+	if remMins == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%dm", hours, remMins)
 }
 
 func (a *App) updateSizes() {
