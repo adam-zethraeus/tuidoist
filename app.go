@@ -34,6 +34,7 @@ type App struct {
 	today     TodayView
 	queue     QueueView
 	completed CompletedView
+	triage    TriageView
 
 	// Loading state
 	loading bool
@@ -51,6 +52,9 @@ type App struct {
 
 	// Completed overlay
 	showCompleted bool
+
+	// Triage overlay
+	showTriage bool
 
 	// Search overlay
 	showSearch bool
@@ -76,6 +80,7 @@ func NewApp(repo *Repository) App {
 		today:     NewTodayView(repo),
 		queue:     NewQueueView(repo),
 		completed: NewCompletedView(repo),
+		triage:    NewTriageView(repo),
 		search:    NewSearchView(repo),
 		loading:   true,
 		spinner:   s,
@@ -116,8 +121,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Ignore mouse on help/search overlays
-		if a.showHelp || a.showSearch {
+		// Ignore mouse on help/search/triage overlays
+		if a.showHelp || a.showSearch || a.showTriage {
 			return a, nil
 		}
 
@@ -223,6 +228,26 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Triage overlay handles its own input
+		if a.showTriage {
+			if !a.triage.handlesInput() {
+				switch msg.String() {
+				case "T", "esc":
+					a.showTriage = false
+					// Refresh active view since triage may have changed tasks
+					if a.isTodayActive() {
+						a.today.Refresh()
+					} else if a.tasks.projectID != "" {
+						cmds = append(cmds, a.repo.RefreshTasks(a.tasks.projectID))
+					}
+					return a, tea.Batch(cmds...)
+				}
+			}
+			var cmd tea.Cmd
+			a.triage, cmd = a.triage.Update(msg)
+			return a, cmd
+		}
+
 		// Don't handle global keys if a dialog or search is open
 		if a.isTodayActive() && a.today.handlesInput() {
 			var cmd tea.Cmd
@@ -260,6 +285,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.showCompleted = true
 			a.completed.SetSize(a.height)
 			a.completed.Refresh()
+			return a, nil
+		case "T":
+			a.showTriage = true
+			a.triage.SetSize(a.width, a.height)
+			a.triage.Open()
 			return a, nil
 		case "tab":
 			if a.focus == focusSidebar {
@@ -622,6 +652,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Pass mutation results to the active content view even when sidebar is focused
 	switch msg.(type) {
 	case taskClosedMsg, taskDeletedMsg, taskCreatedMsg, taskUpdatedMsg, quickAddMsg:
+		// Route to triage if active
+		if a.showTriage {
+			var cmd tea.Cmd
+			a.triage, cmd = a.triage.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		if a.isTodayActive() {
 			if a.focus != focusTasks {
 				var cmd tea.Cmd
@@ -671,6 +707,10 @@ func (a App) View() string {
 
 	if a.showCompleted {
 		return a.completed.View(a.width, a.height)
+	}
+
+	if a.showTriage {
+		return a.triage.View(a.width, a.height)
 	}
 
 	// Header
@@ -839,6 +879,7 @@ func (a App) renderFooter() string {
 				keyHint("a", "add list"),
 				keyHint("d", "archive"),
 				keyHint("^P", "search"),
+				keyHint("T", "triage"),
 				keyHint("C", "completed"),
 				keyHint("?", "help"),
 				keyHint("q", "quit"),
@@ -857,6 +898,7 @@ func (a App) renderFooter() string {
 		hints = append(hints,
 			keyHint("tab", "projects"),
 			keyHint("^P", "search all"),
+			keyHint("T", "triage"),
 			keyHint("C", "completed"),
 			keyHint("Q", "queue"),
 			keyHint("?", "help"),
@@ -878,6 +920,7 @@ func (a App) renderFooter() string {
 		}
 		hints = append(hints,
 			keyHint("^P", "search all"),
+			keyHint("T", "triage"),
 			keyHint("C", "completed"),
 			keyHint("Q", "queue"),
 			keyHint("tab", "projects"),
@@ -919,6 +962,13 @@ func (a App) renderHelp() string {
 		{"/", "Search in current view"},
 		{"n / N", "Next / previous match"},
 		{"esc", "Clear search"},
+		{"", ""},
+		{"Triage", ""},
+		{"T", "Eisenhower matrix triage"},
+		{"1-3", "Assign quadrant (in triage)"},
+		{"0", "Clear priority (in triage)"},
+		{"l", "Set labels (in triage)"},
+		{"enter", "Skip / mark reviewed (in triage)"},
 		{"", ""},
 		{"General", ""},
 		{"r", "Refresh"},

@@ -232,6 +232,18 @@ var (
 	// Today view
 	todayProjectTagStyle = lipgloss.NewStyle().Foreground(colorTextDim)
 	todayUpNextStyle     = lipgloss.NewStyle().Foreground(colorTextDim)
+
+	// Triage / Eisenhower Matrix
+	triageQ1Style       = lipgloss.NewStyle().Foreground(colorP1).Bold(true)
+	triageQ2Style       = lipgloss.NewStyle().Foreground(colorP2).Bold(true)
+	triageQ3Style       = lipgloss.NewStyle().Foreground(colorP3).Bold(true)
+	triageUnsortedStyle = lipgloss.NewStyle().Foreground(colorBlue).Bold(true)
+	triageReviewedStyle = lipgloss.NewStyle().Foreground(colorGreen)
+	triageBorderStyle   = lipgloss.NewStyle().Foreground(colorBorder)
+	triageProgressFull  = lipgloss.NewStyle().Foreground(colorGreen)
+	triageProgressEmpty = lipgloss.NewStyle().Foreground(colorBgHL)
+	triageTitleStyle    = lipgloss.NewStyle().Foreground(colorPurple).Bold(true)
+	triageStatStyle     = lipgloss.NewStyle().Foreground(colorTextDim)
 )
 
 // keyHint renders a styled key shortcut for footer
