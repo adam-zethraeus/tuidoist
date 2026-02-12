@@ -45,8 +45,10 @@ type App struct {
 	toastError bool
 
 	// App mode / overlays
-	mode   appMode
-	search SearchView
+	mode       appMode
+	returnMode appMode
+	search     SearchView
+	actions    actionMenuView
 
 	// Track last selected project to detect changes
 	lastProjectID string
@@ -77,6 +79,7 @@ func NewApp(repo *Repository) App {
 		completed: NewCompletedView(repo),
 		triage:    NewTriageView(repo),
 		search:    NewSearchView(repo),
+		actions:   newActionMenuView(),
 		loading:   true,
 		spinner:   s,
 		mode:      appModeMain,
@@ -122,6 +125,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.completed, cmd = a.completed.Update(msg)
 			return a, cmd
+		case appModeActions:
+			return a, nil
 		case appModeHelp, appModeSearch, appModeTriage:
 			return a, nil
 		}
@@ -190,6 +195,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch a.mode {
+		case appModeActions:
+			var cmd tea.Cmd
+			a.actions, cmd = a.actions.Update(msg)
+			return a, cmd
+
 		case appModeHelp:
 			if action == ActionToggleHelp || action == ActionCancel {
 				a.mode = appModeMain
@@ -205,6 +215,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 
 		case appModeQueue:
+			if action == ActionOpenActions {
+				return a, a.openActionMenu(ctx)
+			}
 			if action == ActionCancel {
 				a.mode = appModeMain
 				return a, nil
@@ -214,6 +227,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 
 		case appModeCompleted:
+			if action == ActionOpenActions {
+				return a, a.openActionMenu(ctx)
+			}
 			if action == ActionCancel {
 				a.mode = appModeMain
 				return a, nil
@@ -224,6 +240,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case appModeTriage:
 			if !a.triage.handlesInput() {
+				if action == ActionOpenActions {
+					return a, a.openActionMenu(ctx)
+				}
 				if action == ActionCancel {
 					a.mode = appModeMain
 					if a.isTodayActive() {
@@ -259,6 +278,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch action {
+		case ActionOpenActions:
+			return a, a.openActionMenu(ctx)
 		case ActionOpenQueue:
 			a.mode = appModeQueue
 			a.queue.Refresh()
@@ -600,6 +621,30 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case actionMenuCloseMsg:
+		if a.mode == appModeActions {
+			a.mode = a.returnMode
+		}
+		return a, nil
+
+	case actionMenuInvokeMsg:
+		if a.mode == appModeActions {
+			a.mode = a.returnMode
+		}
+		key, ok := firstDispatchableKeyForAction(msg.context, msg.action)
+		if !ok {
+			return a, func() tea.Msg {
+				return toastMsg{text: "No runnable shortcut for this action", isError: true}
+			}
+		}
+		keyMsg, ok := keyStringToMsg(key)
+		if !ok {
+			return a, func() tea.Msg {
+				return toastMsg{text: "Could not dispatch action key", isError: true}
+			}
+		}
+		return a, func() tea.Msg { return keyMsg }
+
 	case toastMsg:
 		a.toast = msg.text
 		a.toastError = msg.isError
@@ -754,7 +799,15 @@ func (a App) View() string {
 		return "Loading..."
 	}
 
-	switch a.mode {
+	if a.mode == appModeActions {
+		base := a.viewForMode(a.returnMode)
+		return renderCenteredOverlay(base, a.actions.View(), a.width, a.height)
+	}
+	return a.viewForMode(a.mode)
+}
+
+func (a App) viewForMode(mode appMode) string {
+	switch mode {
 	case appModeHelp:
 		return a.renderHelp()
 	case appModeSearch:
@@ -765,8 +818,12 @@ func (a App) View() string {
 		return a.completed.View(a.width, a.height)
 	case appModeTriage:
 		return a.triage.View(a.width, a.height)
+	default:
+		return a.renderMainView()
 	}
+}
 
+func (a App) renderMainView() string {
 	// Header
 	header := a.renderHeader()
 
@@ -876,6 +933,8 @@ func (a App) currentInputContext() InputContext {
 		return ContextHelp
 	case appModeSearch:
 		return ContextSearchOverlay
+	case appModeActions:
+		return a.actions.Context()
 	case appModeQueue:
 		return ContextQueueOverlay
 	case appModeCompleted:
@@ -1078,4 +1137,58 @@ func (a *App) updateSizes() {
 		a.tasks.SetFocused(a.focus == focusTasks)
 		a.today.SetFocused(false)
 	}
+	a.actions.SetSize(a.width, a.height)
+}
+
+func (a *App) openActionMenu(ctx InputContext) tea.Cmd {
+	a.returnMode = a.mode
+	a.mode = appModeActions
+	a.actions.SetSize(a.width, a.height)
+	return a.actions.Open(ctx)
+}
+
+func firstDispatchableKeyForAction(ctx InputContext, action Action) (string, bool) {
+	for _, key := range KeysForAction(ctx, action) {
+		if _, ok := keyStringToMsg(key); ok {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+func keyStringToMsg(key string) (tea.KeyMsg, bool) {
+	switch key {
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}, true
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}, true
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}, true
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}, true
+	case "down":
+		return tea.KeyMsg{Type: tea.KeyDown}, true
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}, true
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}, true
+	case " ":
+		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")}, true
+	case "backspace":
+		return tea.KeyMsg{Type: tea.KeyBackspace}, true
+	case "ctrl+p":
+		return tea.KeyMsg{Type: tea.KeyCtrlP}, true
+	case "ctrl+n":
+		return tea.KeyMsg{Type: tea.KeyCtrlN}, true
+	case "ctrl+c":
+		return tea.KeyMsg{Type: tea.KeyCtrlC}, true
+	case "alt+p":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p"), Alt: true}, true
+	default:
+		r := []rune(key)
+		if len(r) == 1 {
+			return tea.KeyMsg{Type: tea.KeyRunes, Runes: r}, true
+		}
+	}
+	return tea.KeyMsg{}, false
 }

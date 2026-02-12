@@ -13,6 +13,7 @@ const (
 	ActionOpenCompleted
 	ActionOpenTriage
 	ActionOpenSearch
+	ActionOpenActions
 	ActionToggleFocus
 	ActionFocusTasks
 	ActionNewTask
@@ -91,6 +92,7 @@ var contextBindings = map[InputContext][]KeyBinding{
 	},
 	ContextQueueOverlay: {
 		{Action: ActionCancel, Keys: []string{"Q", "esc"}, Hint: "Q", Desc: "close"},
+		{Action: ActionOpenActions, Keys: []string{"."}, Hint: ".", Desc: "actions"},
 		{Action: ActionNavDown, Keys: []string{"j", "down"}, Hint: "j/k", Desc: "nav"},
 		{Action: ActionNavUp, Keys: []string{"k", "up"}, Hint: "j/k", Desc: "nav"},
 		{Action: ActionRetry, Keys: []string{"r"}, Hint: "r", Desc: "retry"},
@@ -100,6 +102,7 @@ var contextBindings = map[InputContext][]KeyBinding{
 	},
 	ContextCompletedOverlay: {
 		{Action: ActionCancel, Keys: []string{"C", "esc"}, Hint: "C", Desc: "close"},
+		{Action: ActionOpenActions, Keys: []string{"."}, Hint: ".", Desc: "actions"},
 		{Action: ActionNavDown, Keys: []string{"j", "down"}, Hint: "j/k", Desc: "nav"},
 		{Action: ActionNavUp, Keys: []string{"k", "up"}, Hint: "j/k", Desc: "nav"},
 		{Action: ActionConfirm, Keys: []string{"enter", " "}, Hint: "enter", Desc: "open/reopen"},
@@ -107,6 +110,7 @@ var contextBindings = map[InputContext][]KeyBinding{
 	},
 	ContextTriageOverlay: {
 		{Action: ActionCancel, Keys: []string{"T", "esc"}, Hint: "T", Desc: "close"},
+		{Action: ActionOpenActions, Keys: []string{"."}, Hint: ".", Desc: "actions"},
 		{Action: ActionNavDown, Keys: []string{"j", "down"}, Hint: "j/k", Desc: "nav"},
 		{Action: ActionNavUp, Keys: []string{"k", "up"}, Hint: "j/k", Desc: "nav"},
 		{Action: ActionNavTop, Keys: []string{"g"}, Hint: "g", Desc: "top"},
@@ -131,6 +135,7 @@ var contextBindings = map[InputContext][]KeyBinding{
 	},
 	ContextMainSidebar: {
 		{Action: ActionQuit, Keys: []string{"q", "ctrl+c"}, Hint: "q", Desc: "quit"},
+		{Action: ActionOpenActions, Keys: []string{"."}, Hint: ".", Desc: "actions"},
 		{Action: ActionToggleHelp, Keys: []string{"?"}, Hint: "?", Desc: "help"},
 		{Action: ActionOpenSearch, Keys: []string{"ctrl+p", "alt+p"}, Hint: "^P", Desc: "search"},
 		{Action: ActionOpenQueue, Keys: []string{"Q"}, Hint: "Q", Desc: "queue"},
@@ -153,6 +158,7 @@ var contextBindings = map[InputContext][]KeyBinding{
 	},
 	ContextMainTasks: {
 		{Action: ActionQuit, Keys: []string{"q", "ctrl+c"}, Hint: "q", Desc: "quit"},
+		{Action: ActionOpenActions, Keys: []string{"."}, Hint: ".", Desc: "actions"},
 		{Action: ActionToggleHelp, Keys: []string{"?"}, Hint: "?", Desc: "help"},
 		{Action: ActionOpenSearch, Keys: []string{"ctrl+p", "alt+p"}, Hint: "^P", Desc: "search all"},
 		{Action: ActionOpenQueue, Keys: []string{"Q"}, Hint: "Q", Desc: "queue"},
@@ -190,6 +196,7 @@ var contextBindings = map[InputContext][]KeyBinding{
 	},
 	ContextMainToday: {
 		{Action: ActionQuit, Keys: []string{"q", "ctrl+c"}, Hint: "q", Desc: "quit"},
+		{Action: ActionOpenActions, Keys: []string{"."}, Hint: ".", Desc: "actions"},
 		{Action: ActionToggleHelp, Keys: []string{"?"}, Hint: "?", Desc: "help"},
 		{Action: ActionOpenSearch, Keys: []string{"ctrl+p", "alt+p"}, Hint: "^P", Desc: "search all"},
 		{Action: ActionOpenQueue, Keys: []string{"Q"}, Hint: "Q", Desc: "queue"},
@@ -219,6 +226,61 @@ var contextBindings = map[InputContext][]KeyBinding{
 		{Action: ActionConfirm, Keys: []string{"enter"}, Hint: "enter", Desc: "search"},
 		{Action: ActionCancel, Keys: []string{"esc"}, Hint: "esc", Desc: "cancel"},
 	},
+}
+
+type DiscoverableAction struct {
+	Action Action
+	Desc   string
+	Keys   []string
+}
+
+func DiscoverableActions(ctx InputContext) []DiscoverableAction {
+	bindings := contextBindings[ctx]
+	order := make([]Action, 0, len(bindings))
+	items := make(map[Action]DiscoverableAction)
+	for _, b := range bindings {
+		if b.Desc == "" {
+			continue
+		}
+		if b.Action == ActionOpenActions {
+			continue
+		}
+		if _, ok := items[b.Action]; !ok {
+			order = append(order, b.Action)
+			items[b.Action] = DiscoverableAction{
+				Action: b.Action,
+				Desc:   b.Desc,
+				Keys:   append([]string{}, b.Keys...),
+			}
+			continue
+		}
+		cur := items[b.Action]
+		seen := make(map[string]bool, len(cur.Keys))
+		for _, k := range cur.Keys {
+			seen[k] = true
+		}
+		for _, k := range b.Keys {
+			if !seen[k] {
+				cur.Keys = append(cur.Keys, k)
+				seen[k] = true
+			}
+		}
+		items[b.Action] = cur
+	}
+	out := make([]DiscoverableAction, 0, len(order))
+	for _, a := range order {
+		out = append(out, items[a])
+	}
+	return out
+}
+
+func KeysForAction(ctx InputContext, action Action) []string {
+	for _, b := range contextBindings[ctx] {
+		if b.Action == action {
+			return append([]string{}, b.Keys...)
+		}
+	}
+	return nil
 }
 
 func ResolveAction(ctx InputContext, key string) Action {
@@ -258,7 +320,7 @@ func HelpSections() []helpSection {
 		{Title: "Projects", Context: ContextMainSidebar, ActionFilter: map[Action]bool{ActionAddProject: true, ActionArchiveProject: true}},
 		{Title: "Search", Context: ContextMainTasks, ActionFilter: map[Action]bool{ActionOpenSearch: true, ActionSearchLocal: true, ActionSearchNext: true, ActionClearSearch: true}},
 		{Title: "Triage", Context: ContextTriageOverlay, ActionFilter: map[Action]bool{ActionOpenTriage: true, ActionSetPriority1: true, ActionSetPriority2: true, ActionSetPriority3: true, ActionClearPriority: true, ActionSetLabels: true, ActionMarkReviewed: true}},
-		{Title: "General", Context: ContextMainTasks, ActionFilter: map[Action]bool{ActionRefresh: true, ActionOpenCompleted: true, ActionOpenQueue: true, ActionToggleHelp: true, ActionQuit: true}},
+		{Title: "General", Context: ContextMainTasks, ActionFilter: map[Action]bool{ActionOpenActions: true, ActionRefresh: true, ActionOpenCompleted: true, ActionOpenQueue: true, ActionToggleHelp: true, ActionQuit: true}},
 	}
 }
 
