@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -19,9 +20,9 @@ type TriageView struct {
 	projectNames map[string]string
 	items        []triageItem
 	cursor       int
-	scrollOffset int
 	width        int
 	height       int
+	viewport     viewport.Model
 
 	// Session tracking
 	reviewed map[string]bool
@@ -90,7 +91,7 @@ func (v *TriageView) Open() {
 	v.changes = triageStats{}
 	v.mode = ""
 	v.cursor = 0
-	v.scrollOffset = 0
+	v.viewport.YOffset = 0
 	v.rebuildItems()
 	v.skipToNextTask(1)
 }
@@ -98,11 +99,18 @@ func (v *TriageView) Open() {
 func (v *TriageView) SetSize(width, height int) {
 	v.width = width
 	v.height = height
+	if v.viewport.Width == 0 || v.viewport.Height == 0 {
+		v.viewport = viewport.New(width, height)
+	} else {
+		v.viewport.Width = width
+		v.viewport.Height = height
+	}
 	v.dueInput.Width = width - 12
 	v.deadlineInput.Width = width - 12
 	v.editInput.Width = width - 12
 	v.quickInput.Width = width - 12
 	v.labelInput.Width = width - 12
+	v.ensureVisible()
 }
 
 func (v TriageView) handlesInput() bool {
@@ -351,7 +359,9 @@ func (v TriageView) handleKey(msg tea.KeyMsg) (TriageView, tea.Cmd) {
 		v.ensureVisible()
 		return v, nil
 	case ActionNavTop:
-		listJumpTop(&v.cursor, &v.scrollOffset, len(v.items), func(idx int) bool { return v.items[idx].isSection })
+		tmp := 0
+		listJumpTop(&v.cursor, &tmp, len(v.items), func(idx int) bool { return v.items[idx].isSection })
+		v.ensureVisible()
 		return v, nil
 	case ActionNavBottom:
 		listJumpBottom(&v.cursor, len(v.items), func(idx int) bool { return v.items[idx].isSection })
@@ -512,22 +522,10 @@ func (v TriageView) View(width, height int) string {
 	b.WriteString("\n\n")
 
 	// Task list
-	matrixHeight := 8 // matrix takes ~6 lines + 2 blank
-	footerHeight := 4 // footer + dialog space
-	listHeight := height - matrixHeight - footerHeight - 2
-	if listHeight < 1 {
-		listHeight = 1
-	}
-
 	if len(v.items) == 0 {
 		b.WriteString(emptyStyle.Render("No tasks to triage"))
 	} else {
-		end := v.scrollOffset + listHeight
-		if end > len(v.items) {
-			end = len(v.items)
-		}
-
-		for i := v.scrollOffset; i < end; i++ {
+		for i := 0; i < len(v.items); i++ {
 			item := v.items[i]
 
 			if item.isSection {
@@ -540,7 +538,7 @@ func (v TriageView) View(width, height int) string {
 			selected := i == v.cursor
 			line := v.renderTask(task, selected, width-6, mutationStatus[task.ID], assigneeNames)
 			b.WriteString(line)
-			if i < end-1 {
+			if i < len(v.items)-1 {
 				b.WriteString("\n")
 			}
 		}
@@ -556,7 +554,17 @@ func (v TriageView) View(width, height int) string {
 	b.WriteString("\n\n")
 	b.WriteString(v.renderFooter())
 
-	return helpStyle.Width(width).Height(height).Render(b.String())
+	vp := v.viewport
+	if vp.Width != width || vp.Height != height {
+		if vp.Width == 0 || vp.Height == 0 {
+			vp = viewport.New(width, height)
+		} else {
+			vp.Width = width
+			vp.Height = height
+		}
+	}
+	vp.SetContent(b.String())
+	return vp.View()
 }
 
 func (v TriageView) renderMatrix() string {
@@ -985,11 +993,28 @@ func (v *TriageView) clampCursor() {
 }
 
 func (v *TriageView) ensureVisible() {
-	listHeight := v.height - 14 // matrix + header + footer
-	if listHeight < 1 {
-		listHeight = 1
+	line := v.selectedViewportLine()
+	if line < 0 || v.viewport.Height <= 0 {
+		return
 	}
-	listEnsureVisible(v.cursor, &v.scrollOffset, listHeight)
+	if line < v.viewport.YOffset {
+		v.viewport.YOffset = line
+		return
+	}
+	if line >= v.viewport.YOffset+v.viewport.Height {
+		v.viewport.YOffset = line - v.viewport.Height + 1
+	}
+	if v.viewport.YOffset < 0 {
+		v.viewport.YOffset = 0
+	}
+}
+
+func (v *TriageView) selectedViewportLine() int {
+	if v.cursor < 0 || v.cursor >= len(v.items) {
+		return -1
+	}
+	// Title+progress (1), blank (1), matrix (7), blank (1) => list starts at line 10.
+	return 10 + v.cursor
 }
 
 func (v *TriageView) advanceToNextUnreviewed() {
