@@ -291,8 +291,6 @@ type navigateToProjectMsg struct {
 	projectID string
 }
 
-type actionMenuCloseMsg struct{}
-
 type actionMenuInvokeMsg struct {
 	context InputContext
 	action  Action

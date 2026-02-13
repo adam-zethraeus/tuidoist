@@ -45,10 +45,8 @@ type App struct {
 	toastError bool
 
 	// App mode / overlays
-	mode       appMode
-	returnMode appMode
-	search     SearchView
-	actions    actionMenuView
+	mode   appMode
+	search SearchView
 
 	// Track last selected project to detect changes
 	lastProjectID string
@@ -79,7 +77,6 @@ func NewApp(repo *Repository) App {
 		completed: NewCompletedView(repo),
 		triage:    NewTriageView(repo),
 		search:    NewSearchView(repo),
-		actions:   newActionMenuView(),
 		loading:   true,
 		spinner:   s,
 		mode:      appModeMain,
@@ -125,8 +122,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.completed, cmd = a.completed.Update(msg)
 			return a, cmd
-		case appModeActions:
-			return a, nil
 		case appModeHelp, appModeSearch, appModeTriage:
 			return a, nil
 		}
@@ -195,11 +190,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch a.mode {
-		case appModeActions:
-			var cmd tea.Cmd
-			a.actions, cmd = a.actions.Update(msg)
-			return a, cmd
-
 		case appModeHelp:
 			if action == ActionToggleHelp || action == ActionCancel {
 				a.mode = appModeMain
@@ -216,7 +206,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case appModeQueue:
 			if action == ActionOpenActions {
-				return a, a.openActionMenu(ctx)
+				a.mode = appModeSearch
+				a.search.Open(ctx)
+				return a, textinput.Blink
 			}
 			if action == ActionCancel {
 				a.mode = appModeMain
@@ -228,7 +220,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case appModeCompleted:
 			if action == ActionOpenActions {
-				return a, a.openActionMenu(ctx)
+				a.mode = appModeSearch
+				a.search.Open(ctx)
+				return a, textinput.Blink
 			}
 			if action == ActionCancel {
 				a.mode = appModeMain
@@ -241,7 +235,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case appModeTriage:
 			if !a.triage.handlesInput() {
 				if action == ActionOpenActions {
-					return a, a.openActionMenu(ctx)
+					a.mode = appModeSearch
+					a.search.Open(ctx)
+					return a, textinput.Blink
 				}
 				if action == ActionCancel {
 					a.mode = appModeMain
@@ -279,14 +275,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch action {
 		case ActionOpenActions:
-			return a, a.openActionMenu(ctx)
+			a.mode = appModeSearch
+			a.search.Open(ctx)
+			return a, textinput.Blink
 		case ActionOpenQueue:
 			a.mode = appModeQueue
 			a.queue.Refresh()
 			return a, nil
 		case ActionOpenSearch:
 			a.mode = appModeSearch
-			a.search.Open()
+			a.search.Open(ctx)
 			return a, textinput.Blink
 		case ActionToggleHelp:
 			a.mode = appModeHelp
@@ -621,16 +619,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case actionMenuCloseMsg:
-		if a.mode == appModeActions {
-			a.mode = a.returnMode
-		}
-		return a, nil
-
 	case actionMenuInvokeMsg:
-		if a.mode == appModeActions {
-			a.mode = a.returnMode
-		}
 		key, ok := firstDispatchableKeyForAction(msg.context, msg.action)
 		if !ok {
 			return a, func() tea.Msg {
@@ -798,11 +787,6 @@ func (a App) View() string {
 	if !a.ready {
 		return "Loading..."
 	}
-
-	if a.mode == appModeActions {
-		base := a.viewForMode(a.returnMode)
-		return renderCenteredOverlay(base, a.actions.View(), a.width, a.height)
-	}
 	return a.viewForMode(a.mode)
 }
 
@@ -933,8 +917,6 @@ func (a App) currentInputContext() InputContext {
 		return ContextHelp
 	case appModeSearch:
 		return ContextSearchOverlay
-	case appModeActions:
-		return a.actions.Context()
 	case appModeQueue:
 		return ContextQueueOverlay
 	case appModeCompleted:
@@ -1137,14 +1119,6 @@ func (a *App) updateSizes() {
 		a.tasks.SetFocused(a.focus == focusTasks)
 		a.today.SetFocused(false)
 	}
-	a.actions.SetSize(a.width, a.height)
-}
-
-func (a *App) openActionMenu(ctx InputContext) tea.Cmd {
-	a.returnMode = a.mode
-	a.mode = appModeActions
-	a.actions.SetSize(a.width, a.height)
-	return a.actions.Open(ctx)
 }
 
 func firstDispatchableKeyForAction(ctx InputContext, action Action) (string, bool) {

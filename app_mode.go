@@ -6,7 +6,6 @@ const (
 	appModeMain appMode = iota
 	appModeHelp
 	appModeSearch
-	appModeActions
 	appModeQueue
 	appModeCompleted
 	appModeTriage

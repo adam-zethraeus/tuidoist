@@ -184,12 +184,16 @@ func placeOverlay(bg, fg string, x, y int) string {
 type searchResultKind int
 
 const (
-	searchResultTask searchResultKind = iota
+	searchResultAction searchResultKind = iota
+	searchResultTask
 	searchResultProject
 )
 
 type searchResult struct {
 	kind        searchResultKind
+	action      Action
+	actionDesc  string
+	actionKeys  string
 	task        *Task
 	project     *Project
 	projectName string // for task results: the project name
@@ -210,6 +214,8 @@ type SearchView struct {
 	allTasks    []Task
 	allProjects []Project
 	projectMap  map[string]string // id -> name
+	context     InputContext
+	actions     []DiscoverableAction
 }
 
 func NewSearchView(repo *Repository) SearchView {
@@ -223,9 +229,10 @@ func NewSearchView(repo *Repository) SearchView {
 	}
 }
 
-func (v *SearchView) Open() {
+func (v *SearchView) Open(ctx InputContext) {
 	v.active = true
 	v.cursor = 0
+	v.context = ctx
 	v.input.Reset()
 	v.input.Focus()
 
@@ -233,6 +240,7 @@ func (v *SearchView) Open() {
 	v.allTasks = v.repo.GetAllCachedTasks()
 	v.allProjects = v.repo.GetCachedProjects()
 	v.projectMap = v.repo.GetProjectNameMap()
+	v.actions = DiscoverableActions(ctx)
 
 	v.filter()
 }
@@ -250,6 +258,25 @@ func (v *SearchView) filter() {
 	query := strings.TrimSpace(v.input.Value())
 	v.results = nil
 	v.cursor = 0
+
+	// Actions (always visible; filtered when query is provided).
+	actionCount := 0
+	for _, a := range v.actions {
+		if actionCount >= 10 {
+			break
+		}
+		keys := strings.Join(a.Keys, " ")
+		if query != "" && !containsMatch(a.Desc, query) && !containsMatch(keys, query) {
+			continue
+		}
+		v.results = append(v.results, searchResult{
+			kind:       searchResultAction,
+			action:     a.Action,
+			actionDesc: a.Desc,
+			actionKeys: strings.Join(a.Keys, " / "),
+		})
+		actionCount++
+	}
 
 	if query == "" {
 		return
@@ -318,6 +345,13 @@ func (v SearchView) Update(msg tea.Msg) (SearchView, tea.Cmd) {
 			r := v.results[v.cursor]
 			v.Close()
 			switch r.kind {
+			case searchResultAction:
+				return v, func() tea.Msg {
+					return actionMenuInvokeMsg{
+						context: v.context,
+						action:  r.action,
+					}
+				}
 			case searchResultTask:
 				return v, func() tea.Msg {
 					return navigateToTaskMsg{
@@ -374,20 +408,17 @@ func (v SearchView) View(width, height int) string {
 
 	query := strings.TrimSpace(v.input.Value())
 
-	if query == "" {
+	if len(v.results) == 0 {
 		b.WriteString("\n")
+		msg := "No matches"
+		if query == "" {
+			msg = "Type to search tasks/lists/actions"
+		}
 		b.WriteString(lipgloss.NewStyle().
 			Foreground(colorTextDim).
 			Italic(true).
 			Padding(0, 2).
-			Render("Type to search tasks and lists"))
-	} else if len(v.results) == 0 {
-		b.WriteString("\n")
-		b.WriteString(lipgloss.NewStyle().
-			Foreground(colorTextDim).
-			Italic(true).
-			Padding(0, 2).
-			Render("No matches"))
+			Render(msg))
 	} else {
 		b.WriteString("\n")
 		maxVisible := height - 11
@@ -419,6 +450,8 @@ func (v SearchView) View(width, height int) string {
 					b.WriteString("\n")
 				}
 				switch r.kind {
+				case searchResultAction:
+					b.WriteString("  " + sectionStyle.Render("Actions"))
 				case searchResultTask:
 					b.WriteString("  " + sectionStyle.Render("Tasks"))
 				case searchResultProject:
@@ -430,6 +463,31 @@ func (v SearchView) View(width, height int) string {
 
 			var line string
 			switch r.kind {
+			case searchResultAction:
+				label := truncate(r.actionDesc, width-24)
+				keys := r.actionKeys
+				if selected {
+					label = highlightMatchPlain(label, query)
+					keys = highlightMatchPlain(keys, query)
+					line = "  → " + label
+					if keys != "" {
+						line += "  " + keys
+					}
+					line = lipgloss.NewStyle().
+						Background(colorBgHL).
+						Foreground(colorBright).
+						Bold(true).
+						Width(width - 4).
+						Render(line)
+				} else {
+					label = highlightMatch(label, query, taskContentStyle, searchMatchStyle)
+					line = "  " + footerKeyStyle.Render("→") + "  " + label
+					if keys != "" {
+						k := highlightMatch(keys, query, footerDescStyle, searchMatchStyle)
+						line += "  " + k
+					}
+				}
+
 			case searchResultTask:
 				content := truncate(r.task.Content, width-20)
 				if selected {
@@ -520,7 +578,7 @@ func (v SearchView) View(width, height int) string {
 	b.WriteString("\n\n")
 	b.WriteString(footerKeyStyle.Render("↑/↓") + " " + footerDescStyle.Render("navigate") + "  ")
 	if len(v.results) > 0 {
-		b.WriteString(footerKeyStyle.Render("enter") + " " + footerDescStyle.Render("go to") + "  ")
+		b.WriteString(footerKeyStyle.Render("enter") + " " + footerDescStyle.Render("run/open") + "  ")
 		b.WriteString(footerKeyStyle.Render("alt+enter") + " " + footerDescStyle.Render("new task") + "  ")
 	} else if query != "" {
 		b.WriteString(footerKeyStyle.Render("enter") + " " + footerDescStyle.Render("new task") + "  ")

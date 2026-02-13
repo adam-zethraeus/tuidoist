@@ -242,7 +242,7 @@ func DiscoverableActions(ctx InputContext) []DiscoverableAction {
 		if b.Desc == "" {
 			continue
 		}
-		if b.Action == ActionOpenActions {
+		if b.Action == ActionOpenActions || b.Action == ActionOpenSearch {
 			continue
 		}
 		if _, ok := items[b.Action]; !ok {
